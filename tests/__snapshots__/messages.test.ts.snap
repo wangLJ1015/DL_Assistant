@@ -1,0 +1,536 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`message schemas > are locked by snapshot (adding a message must update this test and the spec) 1`] = `
+{
+  "content": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+          },
+          "type": {
+            "const": "cartClicked",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "id",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "string",
+            },
+            "maxItems": 200,
+            "type": "array",
+          },
+          "type": {
+            "const": "cartSnapshot",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "ids",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+          },
+          "type": {
+            "const": "track",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "id",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+          },
+          "type": {
+            "const": "badgeInfo",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "id",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+          },
+          "type": {
+            "const": "lookup",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "id",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+          },
+          "page": {
+            "enum": [
+              "dashboard",
+              "lookup",
+            ],
+            "type": "string",
+          },
+          "type": {
+            "const": "openPage",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "page",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "shouldSyncCoupons",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "result": {
+            "oneOf": [
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "coupons": {
+                    "items": {},
+                    "maxItems": 500,
+                    "type": "array",
+                  },
+                  "invalid": {
+                    "items": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "code": {
+                          "maxLength": 50,
+                          "type": "string",
+                        },
+                        "index": {
+                          "maximum": 9007199254740991,
+                          "minimum": 0,
+                          "type": "integer",
+                        },
+                        "path": {
+                          "maxLength": 200,
+                          "type": "string",
+                        },
+                      },
+                      "required": [
+                        "index",
+                        "path",
+                        "code",
+                      ],
+                      "type": "object",
+                    },
+                    "maxItems": 10000,
+                    "type": "array",
+                  },
+                  "status": {
+                    "const": "ok",
+                    "type": "string",
+                  },
+                  "total": {
+                    "maximum": 10000,
+                    "minimum": 0,
+                    "type": "integer",
+                  },
+                },
+                "required": [
+                  "status",
+                  "coupons",
+                  "total",
+                  "invalid",
+                ],
+                "type": "object",
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "status": {
+                    "const": "notLoggedIn",
+                    "type": "string",
+                  },
+                },
+                "required": [
+                  "status",
+                ],
+                "type": "object",
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "httpStatus": {
+                    "maximum": 999,
+                    "minimum": 0,
+                    "type": "integer",
+                  },
+                  "status": {
+                    "const": "failed",
+                    "type": "string",
+                  },
+                },
+                "required": [
+                  "status",
+                ],
+                "type": "object",
+              },
+              {
+                "additionalProperties": false,
+                "properties": {
+                  "status": {
+                    "const": "unparsable",
+                    "type": "string",
+                  },
+                },
+                "required": [
+                  "status",
+                ],
+                "type": "object",
+              },
+            ],
+          },
+          "token": {
+            "format": "uuid",
+            "pattern": "^([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}|00000000-0000-0000-0000-000000000000|ffffffff-ffff-ffff-ffff-ffffffffffff)$",
+            "type": "string",
+          },
+          "type": {
+            "const": "couponSyncResult",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "token",
+          "result",
+        ],
+        "type": "object",
+      },
+    ],
+  },
+  "ext": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "from": {
+            "enum": [
+              "manual",
+              "lookup",
+            ],
+            "type": "string",
+          },
+          "id": {
+            "type": "string",
+          },
+          "type": {
+            "const": "track",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "id",
+          "from",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+          },
+          "type": {
+            "const": "untrack",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "id",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+          },
+          "paused": {
+            "type": "boolean",
+          },
+          "type": {
+            "const": "setPaused",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "id",
+          "paused",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+          },
+          "price": {
+            "maximum": 1000000,
+            "minimum": 0,
+            "type": "integer",
+          },
+          "type": {
+            "const": "setTarget",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "id",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+          },
+          "type": {
+            "const": "lookup",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "id",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "ids": {
+            "items": {
+              "type": "string",
+            },
+            "maxItems": 100,
+            "minItems": 1,
+            "type": "array",
+          },
+          "type": {
+            "const": "recheck",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "ids",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "syncCouponsNow",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "clearCoupons",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "key": {
+            "maxLength": 300,
+            "minLength": 1,
+            "type": "string",
+          },
+          "reserved": {
+            "type": "boolean",
+          },
+          "type": {
+            "const": "setCouponReserved",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "key",
+          "reserved",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "partial": {
+            "additionalProperties": false,
+            "properties": {
+              "checkIntervalHours": {
+                "maximum": 24,
+                "minimum": 1,
+                "type": "integer",
+              },
+              "dlwatcherEnabled": {
+                "type": "boolean",
+              },
+              "hideTitlesInNotifications": {
+                "type": "boolean",
+              },
+              "rules": {
+                "additionalProperties": false,
+                "properties": {
+                  "couponExpiring": {
+                    "type": "boolean",
+                  },
+                  "ending": {
+                    "type": "boolean",
+                  },
+                  "lowest": {
+                    "type": "boolean",
+                  },
+                  "sale": {
+                    "type": "boolean",
+                  },
+                  "target": {
+                    "type": "boolean",
+                  },
+                },
+                "required": [
+                  "sale",
+                  "target",
+                  "lowest",
+                  "ending",
+                  "couponExpiring",
+                ],
+                "type": "object",
+              },
+              "showBadge": {
+                "type": "boolean",
+              },
+              "treatUnknownDiscountedAsUsable": {
+                "type": "boolean",
+              },
+              "usePointPaymentMethod": {
+                "type": "boolean",
+              },
+            },
+            "type": "object",
+          },
+          "type": {
+            "const": "setSettings",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+          "partial",
+        ],
+        "type": "object",
+      },
+      {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "resumeDlwatcher",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+        ],
+        "type": "object",
+      },
+    ],
+  },
+  "toContent": {
+    "$schema": "https://json-schema.org/draft/2020-12/schema",
+    "oneOf": [
+      {
+        "additionalProperties": false,
+        "properties": {
+          "type": {
+            "const": "syncNow",
+            "type": "string",
+          },
+        },
+        "required": [
+          "type",
+        ],
+        "type": "object",
+      },
+    ],
+  },
+}
+`;

@@ -20,8 +20,8 @@ DLsite 頁面是已登入的狀態，DLWatcher 是第三方網站，優惠券說
 #### 3.2.2 URL 一律由程式自己組
 - 外部資料不准放進 `href`、`src`、`srcset`、`style`、`action`、`formaction` 和 `on*` 屬性。
 - **作品編號**：統一用 `lib/ids.ts` 的 `isWorkId(s) = /^(RJ|RE|BJ|VJ)(\d{6}|\d{8})$/.test(s)`（前綴清單見 §10.3）。不用沒有錨定的 regex 掃整段字串。
-- **作品頁連結**：只用 `https://www.dlsite.com/${site}/work/=/product_id/${id}.html` 組出。`site` 必須是列舉值（`maniax`、`home`、`books`、`pro`、`soft`…，完整清單見 §10.3），取 API 的 `site_id`，不在列舉內就用 `maniax`；`id` 必須通過 `isWorkId()`。
-- **從網址取作品編號**（F1、F13）：先 `new URL(url)`，要求 `protocol === 'https:'` 且 `host === 'www.dlsite.com'`，再用 `^/[a-z]+/(work|announce)/=/product_id/([A-Z]{2}\d{6,8})(\.html)?(/|$)` 比對 `pathname`，取出的編號再過 `isWorkId()`。其他網址一律不處理。（手機版 `touch` 作品頁的網址若含連字號，regex 改成 `^/[a-z]+(-touch)?/…`，見 §10.3。）
+- **作品頁連結**：只用 `https://www.dlsite.com/${site}/work/=/product_id/${id}.html` 組出。`site` 必須是列舉值（`maniax`、`home`、`books`、`pro`、`soft`、`girls`、`girls-pro`、`girls-drama`、`bl`、`bl-pro`、`bl-drama`、`appx`；2026-11-23 實測，§10.3），取 API 的 `site_id`，不在列舉內就用 `maniax`（實測 `maniax` 路徑也能開 `home` 的作品）；`id` 必須通過 `isWorkId()`。`comic` 會轉址到站外（`www.comipo.app`），**不列入**。
+- **從網址取作品編號**（F1、F13）：先 `new URL(url)`，要求 `protocol === 'https:'` 且 `host === 'www.dlsite.com'`，再用 `^/[a-z]+(-[a-z]+)?/(work|announce)/=/product_id/([A-Z]{2}\d{6,8})(\.html)?(/|$)` 比對 `pathname`，取出的編號再過 `isWorkId()`。其他網址一律不處理。（分站名稱可能含一個連字號，例如 `girls-pro`、`bl-drama`，M1 實測；手機版 `touch` 作品頁的網址格式仍待確認，見 §10.3。）
 - **圖片**：`//` 開頭的協定相對網址先補 `https:`（否則在擴充功能頁面會變成 `chrome-extension://img.dlsite.jp/...`），再用 `new URL()` 解析，要求 `origin === 'https://img.dlsite.jp'` 且 `username`、`password` 為空。不符的一律換成內建的預設圖。DLWatcher 和匯入檔案裡的圖片網址一律不用。
 - **開啟網頁**（分頁、視窗、連結、通知點擊）的規則見 §3.4「導覽與資源載入」。
 - 擴充功能頁面的 CSP 在 MV3 預設值上再收緊（§7.1），讓瀏覽器擋住白名單以外的連線與圖片，作為 §3.4 的第二道防線。
@@ -98,12 +98,13 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
 - content script 的 `matches` 為 `https://www.dlsite.com/*`，`exclude_matches` 排除結帳、付款、帳號設定相關路徑（實際路徑見 §10.3）；`all_frames: false`。
 
 **content script 只放最少的程式碼。** content script 是唯一帶登入 cookie 的環境，它的請求以 DLsite 頁面的來源送出，**不受擴充功能 CSP 的 `connect-src` 約束**。打包進 content script 的任何相依套件，只要有一個被植入惡意版本，就能以登入狀態呼叫 `/home/mypage/coupon` 等帳號端點。所以：
-- `dlsite.content.ts` 不使用 React、Tailwind、Chart.js。徽章與按鈕用原生 DOM（`createElement`＋`textContent`）建立。
+- content script 的進入點是 `src/entrypoints/dlsite-content.ts`，用 WXT 的 `defineUnlistedScript` 打包，`content_scripts` 由 `wxt.config.ts` 自己寫進 manifest。**不用** WXT 的 `defineContentScript`：它的 `ContentScriptContext` 會對頁面 `document` 派送 `CustomEvent`、呼叫 `window.postMessage(..., '*')`（事件名稱含擴充功能 ID），並監聽頁面上的同名事件。頁面腳本因此能得知擴充功能 ID，也能派送假事件讓 content script 自我停用（M1 從打包結果確認）。`check-manifest` 確認 content script 打包檔不含 `postMessage`、`CustomEvent`、`dispatchEvent`、`addEventListener('message')`。
+- `dlsite-content.ts` 不使用 React、Tailwind、Chart.js。徽章與按鈕用原生 DOM（`createElement`＋`textContent`）建立。
 - 注入的 UI 由 content script 自己 `attachShadow({ mode: 'closed' })`，不依賴 WXT 的 `createShadowRootUi`。樣式寫成一段字串放進 shadow root 的 `<style>`（不含 `url()`、`@import`），不 import CSS 檔，所以不需要 `web_accessible_resources`，content script 裡也沒有載入 CSS 的網路請求（WXT 的 `createShadowRootUi` 會透過網路載入 CSS）。
-- content script 可以 import 的模組用 ESLint `no-restricted-imports` 列白名單：`lib/ids.ts`、`lib/text.ts`、`lib/selectors.ts`、`lib/messages.ts`、`lib/zod-setup.ts`、`lib/api/endpoints.ts`（content script 只用 `couponList`，其他端點有呼叫環境檢查）、`lib/coupons/parse.ts`、`lib/dates.ts`、zod、WXT 的 content script 定義工具。新增項目要改規格。
+- content script 可以 import 的模組用 ESLint `no-restricted-imports` 列白名單：`lib/ids.ts`、`lib/text.ts`、`lib/selectors.ts`、`lib/messages.ts`、`lib/zod-setup.ts`、`lib/api/endpoints.ts`（content script 只用 `couponList`，其他端點有呼叫環境檢查）、`lib/coupons/parse.ts`、`lib/dates.ts`、`lib/schema.ts`（`intIn` 等 zod 工具，`coupons/parse.ts` 也要用）、`lib/badge-style.ts`（注入徽章的樣式字串）、`src/content/` 底下的 UI 檔案、zod、`wxt/utils/define-unlisted-script`。新增項目要改規格。（v0.8 加入 `schema.ts`、`badge-style.ts`：v0.7 的清單漏了它們。）
 - content script 禁止使用 `chrome.storage`、`browser.storage` 與 `wxt/storage`（ESLint；`storage.local` 也已鎖住，§4.2），需要的資料一律由 background 回覆。
 - 建置時由一個 Vite plugin 在 `generateBundle` 讀取 content script chunk 的 `modules` 清單，輸出 `content-modules.json`（不需要 source map；若改用 source map，設 `build.sourcemap: 'hidden'`，並確認發佈的 zip 裡沒有 `.map` 檔）。`scripts/check-manifest.ts` 讀它列出 content script 包含的套件與大小，和上一版相比有新增套件就失敗，要人工確認；也確認打包檔不含 `react`、`storage.local`。
-- **content script 的 DOM 寫法另有 ESLint 規則**（只套用在 `dlsite.content.ts` 與它 import 的 UI 檔案）。原生 DOM 沒有 React 的保護，以下寫法都會以登入狀態對 DLsite 發 GET，而 §7.1 的 CSP 管不到 content script：
+- **content script 的 DOM 寫法另有 ESLint 規則**（只套用在 `dlsite-content.ts` 與 `src/content/` 底下的 UI 檔案）。原生 DOM 沒有 React 的保護，以下寫法都會以登入狀態對 DLsite 發 GET，而 §7.1 的 CSP 管不到 content script：
   - `document.createElement` 只能用 `div`、`span`、`button`、`style`；`createElementNS` 只能用 SVG 的 `svg`、`path`、`circle`、`rect`、`g`（不能用 `use`、`image`、`feImage`）。
   - 禁止 `setAttribute` 的第一個參數是 `src`、`href`、`srcset`、`poster`、`data`、`action`、`formaction`、`ping`、`xlink:href`、`style` 或 `on` 開頭；禁止對 `src`、`href`、`srcset`、`action`、`cssText`、`innerHTML`、`outerHTML` 屬性指派；禁止 `style.setProperty`。清空元素用 `replaceChildren()`。
   - 禁止呼叫 `.click()`、`.submit()`、`.requestSubmit()`、`.dispatchEvent()`、`.focus()`。content script 不操作 DLsite 頁面既有的元素，只讀選擇器取到的元素的 `textContent` 與 `href` 字串。
@@ -149,7 +150,7 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
 - `assertAllowed()` 也檢查**參數值**：`product_id` 以 `,` 分開後 1～100 個、每個都通過 `isWorkId()`、沒有重複；`cdn_cache_min === '1'`；每個參數名稱只出現一次；`username`、`password`、`hash` 都是空字串。
 - `apiGet` 檢查**呼叫環境**：`couponList` 要求 `globalThis.location?.origin === 'https://www.dlsite.com'`；`productInfo`、`dlwatcher` 要求在 service worker 裡執行（`typeof ServiceWorkerGlobalScope !== 'undefined' && globalThis instanceof ServiceWorkerGlobalScope`，而且 `location.protocol === 'chrome-extension:'`）。不符就丟例外。環境判斷寫成可注入的 `getRuntimeEnv()`，Vitest 測試時替換它（要在 Vitest 裡讓 `instanceof ServiceWorkerGlobalScope` 成立很麻煩）。
 - 擴充功能頁面需要查價時送訊息（`lookup`、`recheck`），由 background 套用頻率限制與快取後回覆（§3.1）。
-- `product_id` 的逗號被 `URLSearchParams` 編碼成 `%2C`；DLsite 是否接受在 M1 確認，不接受就由 `apiGet` 自己組查詢字串（編號都通過 `isWorkId()`，不含需要編碼的字元）。
+- `product_id` 的逗號被 `URLSearchParams` 編碼成 `%2C`：2026-11-23 實測 DLsite 接受，結果和未編碼相同。
 - **只有 `couponList` 會帶 cookie。** 其他 DLsite 路徑（購物車、結帳、領券、帳號設定）一律不發請求。F2 購物車同步只讀你自己打開的購物車頁面 DOM。
 - 單元測試測**行為**：對 `/home/mypage/coupon`、`/home/mypage/coupon?x=1`、`/home/mypage/coupon/`、`/home/mypage/coupon/list`、`/home/cart`、`/home/buy`、`https://login.dlsite.com/` 呼叫 `assertAllowed()`，每一個都要丟例外；`product_id` 含非法編號、重複參數、帶 `#hash` 的網址也要丟例外。白名單的筆數用快照測試鎖住，新增端點必須同時改測試。
 
@@ -218,7 +219,10 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
 - `externally_connectable` 的 `ids`、`matches` 留空，依 Chrome 文件代表沒有任何擴充功能或網頁能連線。
 - 右鍵選單：`chrome.contextMenus.create` 設定 `contexts: ['link']`、`documentUrlPatterns: ['https://www.dlsite.com/*']`、`targetUrlPatterns: ['https://www.dlsite.com/*/work/=/product_id/*']`。只查史低，不自動加入追蹤，也絕不 fetch `linkUrl` 本身。
 - F13 的小視窗由 `lib/nav.ts` 用 `chrome.windows.create({ type: 'popup', url: 'lookup.html?id=…', width: 420, height: 520 })` 開啟，作品編號依 §3.2.2 驗證後才放進查詢參數；`lookup.html` 讀取參數時再驗證一次，並要求 `searchParams.getAll('id').length === 1`。
-- 這整條 CSP 是否被 Chrome 接受並生效（擋住測試頁裡的 `<form>` 送出、外部 CSS、`/home/mypage/coupon` 的連線），M1 時確認（§10.3）。
+- 這整條 CSP 被 Chrome 157 接受並生效：`<form>` 送出、外部 CSS、`img.dlsite.jp` 以外的圖片、對 `/home/mypage/coupon` 的 fetch 都被擋，service worker 對白名單外路徑的 fetch 也被擋（M1，`tests/e2e/verify-m1.ts`）。
+- **開發模式**（`wxt` 開發伺服器）：上面的 CSP 會擋住 HMR 的 WebSocket（`connect-src`）與 Vite 注入的 `<style>`（`style-src`），M1 實測。所以只有 `command === 'serve'` 時改用 `scripts/manifest-policy.ts` 的 `DEV_MANIFEST_CSP`（`connect-src` 加 `http://localhost:3000 ws://localhost:3000`、`style-src` 加 `'unsafe-inline'`）。`check-manifest` 確認正式建置沒有 `'unsafe-inline'` 與 `localhost`。
+- Chrome 137 起正式版不支援 `--load-extension`，所以關閉 WXT 自動開瀏覽器的功能（`webExt.disabled`）；開發時到 `chrome://extensions` 手動載入 `.output/chrome-mv3-dev`。
+- manifest 的固定值（權限、CSP、content script）集中在 `scripts/manifest-policy.ts`，`wxt.config.ts` 與 `check-manifest` 共用同一份。
 
 ### 7.2 建置與供應鏈
 - zod：使用 zod 4。zod 4 原始碼的 `$ZodConfig` 有 `jitless` 選項，`allowsEval` 是第一次需要時才計算並快取，所以只要在**第一次 parse 之前**呼叫 `z.config({ jitless: true })` 就有效。`lib/zod-setup.ts` 只做這件事，每個進入點（background、content script、各個擴充功能頁面、worker）的第一個 import 就是它。M1 在擴充功能頁面監聽 `securitypolicyviolation` 事件、background 看 console，跑一次完整的解析測試，確認沒有任何 CSP 違規。
@@ -228,7 +232,7 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
   - 字串裡出現的 `https://` 網域只能是 `www.dlsite.com`、`img.dlsite.jp`、`dlwatcher.com`（套件內建的說明網址另列白名單）。
   - 不能出現 `/mypage\/coupon(?!\/list\/ajax)/`、`/home/buy` 與加入購物車的路徑（§3.4 第 4 層）。
   - content script 打包檔的套件清單與上一版比對（§3.2.5）。
-- `package.json` 用 `packageManager` 固定 pnpm 的某個版本（11 或 12，M1 決定；以下設定名稱兩版相同，依 pnpm 文件，各設定的最低支援版本 M1 確認）。`pnpm-lock.yaml` 進版控；CI 用 `pnpm install --frozen-lockfile`；每次升級套件跑 `pnpm audit`。
+- `package.json` 用 `packageManager` 固定 pnpm 版本：**`pnpm@12.21.0`**（M1 決定）。以下設定在 12.21 都實際生效：`trustPolicy` 在 M1 就擋下了 puppeteer 的相依套件 `chromium-bidi` 的信任降級，所以實機驗證改用 Node 內建功能走 CDP，不裝 puppeteer、也不加 `trustPolicyExclude`。本機沒有全域 pnpm 時用 `corepack pnpm …`；`pnpm ci` 是 pnpm 內建指令（乾淨安裝），不能當 script 名稱，整套檢查用 `pnpm check:all`。`pnpm-lock.yaml` 進版控；CI 用 `pnpm install --frozen-lockfile`；每次升級套件跑 `pnpm audit`。
 - `pnpm-workspace.yaml` 明確寫出：
   - `minimumReleaseAge: 1440`（發佈未滿 1 天的版本不安裝，降低剛被植入的惡意版本被升級進來的機會；pnpm 11 預設就是 1440，明確寫出避免日後預設改變）。
   - `trustPolicy: no-downgrade`（套件的信任等級下降時安裝失敗，例如原本有 provenance、新版沒有；預設是 `off`，所以一定要明確寫）。某個套件因此安裝失敗時，用 `trustPolicyExclude` 列出，並在 PR 說明原因。

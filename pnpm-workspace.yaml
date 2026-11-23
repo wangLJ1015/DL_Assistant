@@ -1,0 +1,5 @@
+# §7.2 供應鏈設定（pnpm 12）
+minimumReleaseAge: 1440
+trustPolicy: no-downgrade
+strictDepBuilds: true
+allowBuilds: {}

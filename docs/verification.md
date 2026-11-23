@@ -27,20 +27,20 @@
 
 | 項目 | 要確認的事 | 時機 |
 |---|---|---|
-| 收緊的 CSP | §7.1 的整條 `extension_pages` CSP（`default-src`、`form-action`、路徑限定的 `connect-src`、`object-src 'none'`）是否被 Chrome 接受並生效：測試頁的 `<form>` 送出、外部 CSS、對 `/home/mypage/coupon` 的 fetch 都要被擋。（是否也約束 service worker：文件已確認會） | M1 |
-| `minimum_chrome_version` | manifest 被接受 | M1 |
-| `storage.local` 存取層級 | `setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' })` 在 Chrome 120 對 `storage.local` 有效，設定後 content script 呼叫 `chrome.storage.local.get` 會失敗；重開瀏覽器後是否保留（不論結果都每次啟動重設）（§4.2） | M1 |
-| 開發模式 CSP | WXT 開發模式下 §7.1 的 `style-src 'self'` 是否擋住 HMR 的樣式；若會，只在開發模式放寬，`check-manifest` 確認發佈版沒有 `'unsafe-inline'` | M1 |
-| `meta refresh` | 以程式插入擴充功能頁面的 `<meta http-equiv=refresh>` 會不會導覽（不論結果都保留 lint 規則） | M1 |
-| `externally_connectable` | 文件已確認留空代表沒有任何連線；M1 只確認 manifest 被接受 | M1 |
-| zod 4 | ✅ 原始碼已確認有 `jitless`，第一次 parse 之前呼叫即可（§7.2）；M1 只確認沒有 CSP 違規 | M1 |
-| fetch 與 User-Agent | 確認 fetch 無法覆寫 User-Agent（只是確認，規格已不自訂） | M1 |
-| pnpm | 固定 11 或 12（12 是目前的主版本）；各設定的最低支援版本；`trustPolicy` 預設是 `off`，要明確設定 | M1 |
+| ~~收緊的 CSP~~ | ✅ M1（Chrome 157）：manifest 被接受；`<form>` 送出、外部 CSS、`img.dlsite.jp` 以外的圖片、對 `/home/mypage/coupon` 的 fetch 都被擋（請求沒有送出）；service worker 對白名單外路徑的 fetch 也被擋。`pnpm verify:chrome` 重跑 | M1 |
+| ~~`minimum_chrome_version`~~ | ✅ M1：manifest 被接受 | M1 |
+| `storage.local` 存取層級 | ✅ M1（Chrome 157）：設定後 content script 的 `chrome.storage.local.get` 失敗（「Access to storage is not allowed from this context.」），`storage.session` 也一樣。未確認：Chrome 120 本身（實測用 157）、重開瀏覽器後是否保留（每次啟動都會重設，結果不影響安全性） | M1 |
+| ~~開發模式 CSP~~ | ✅ M1：**會擋**。開發模式下 `connect-src` 擋住 HMR 的 `ws://localhost:3000`，`style-src 'self'` 擋住 Vite 注入的 `<style>`（樣式完全沒套用）。改成只在開發伺服器放寬（§7.1 `DEV_MANIFEST_CSP`），放寬後沒有違規；`check-manifest` 確認發佈版沒有 `'unsafe-inline'` | M1 |
+| ~~`meta refresh`~~ | ✅ M1：以程式插入擴充功能頁面的 `<meta http-equiv=refresh>` **會導覽**（CSP 擋不住），lint 規則必須保留 | M1 |
+| ~~`externally_connectable`~~ | ✅ M1：manifest 被接受 | M1 |
+| ~~zod 4~~ | ✅ M1：popup 與 background 跑完整的解析流程，沒有任何 CSP 違規或例外 | M1 |
+| ~~fetch 與 User-Agent~~ | ✅ M1：在擴充功能頁面 fetch 時指定 `User-Agent`，實際送出的仍是瀏覽器的 UA（無法覆寫） | M1 |
+| ~~pnpm~~ | ✅ M1：固定 `pnpm@12.21.0`。`minimumReleaseAge`、`trustPolicy: no-downgrade`、`strictDepBuilds`、`allowBuilds` 都生效（`trustPolicy` 擋下了 puppeteer → `chromium-bidi` 的信任降級，因此不使用 puppeteer） | M1 |
 | content script 模組清單 | Vite plugin 的 `generateBundle` 在 WXT 的 content script 建置中能否取得 chunk 的 `modules`（§3.2.5） | M2 |
-| service worker 的 `location` | `ServiceWorkerGlobalScope` 與 `location.protocol` 的檢查在 WXT 輸出的 background 裡成立（§3.4） | M1 |
-| 作品編號 | 前綴清單（`RJ`、`RE`、`BJ`、`VJ` 之外還有哪些）、分站列舉值的完整清單；用 `maniax` 路徑組作品頁網址是否都能開；手機版（`touch`）作品頁的網址格式（若含連字號，§3.2.2 的路徑 regex 與分站列舉值一起調整） | M1 |
-| 擴充功能來源 | 在 Chrome 裡 popup、分頁中的儀表板、`lookup.html` 送訊息時 `sender.origin` 是否都是 `chrome-extension://<id>` | M1 |
-| 商品 API | 回應最外層是以編號為 key 的物件還是陣列；沒有活動時 `campaign_id` 是 `null`、空字串還是不出現；不存在或已刪除的編號是不出現、`null` 還是整批錯誤（整批錯誤時用 §4.1 的拆半重試）；`product_id` 的逗號編碼成 `%2C` 是否接受 | M1 |
+| ~~service worker 的 `location`~~ | ✅ M1：WXT 輸出的 background 裡 `globalThis instanceof ServiceWorkerGlobalScope` 為 true、`location.protocol` 是 `chrome-extension:` | M1 |
+| 作品編號 | ✅ 分站（M1，2026-11-23）：`maniax`、`home`、`books`、`pro`、`soft`、`girls`、`girls-pro`、`girls-drama`、`bl`、`bl-pro`、`bl-drama`、`appx` 的作品頁網址都留在 www.dlsite.com；`comic` 轉址到 `www.comipo.app`（排除）；`aix`、`ecchi-eng` 不是作品頁；分站名稱含連字號，§3.2.2 的路徑 regex 已放寬。`maniax` 路徑能開 `home` 的作品。**未確認**：`RJ`／`RE`／`BJ`／`VJ` 之外的前綴、手機版（`touch`）作品頁的網址格式 | M1 → M2 |
+| 擴充功能來源 | ✅ M1：以分頁開啟的 popup.html 送訊息時 `sender.origin` 是 `chrome-extension://<id>`、`sender.url` 以 `getURL('')` 開頭（帶 `tab`）。**未確認**：真正的 popup 視窗（headless 無法開啟）、`lookup.html`（M6 才有） | M1 → M6 |
+| ~~商品 API~~ | ✅ M1（2026-11-23）：最外層是以編號為 key 的物件；**全部編號都不存在時是 `[]`**；不存在的編號直接不出現（不是 `null`、也不會整批錯誤）；沒有打折時 `campaign_id`、`discount_rate`、`discount_end_date` 不出現；`%2C` 接受。另外：`product_id` 含 `__proto__` 時回 403 HTML（WAF），`assertAllowed` 不會送出這種請求；沒有圖的作品 `work_image` 是 `//www.dlsite.com/images/web/home/no_img_main.gif`（依 §3.2.2 換成預設圖）。`RJ99999999` 是 DLsite 的測試作品（「TestWork839」），不能當作「不存在的編號」測試 | M1 |
 | content script 排除路徑 | 結帳、付款、帳號設定頁與購物車頁的實際路徑，寫進 `exclude_matches` 與 `selectors.ts`；加入購物車的實際路徑，寫進打包掃描（§3.4） | M2 |
 | `onMessage` 非同步回應 | `return true`＋`sendResponse` 在 service worker 冷啟動時正常；`badgeInfo` 的實際回覆時間 | M2 |
 | `sender.url` | `history.pushState` 之後是否跟著改變（影響 `cartSnapshot` 的頁面檢查；每日上限仍有效） | M2 |

@@ -1,0 +1,50 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`endpoint whitelist > is locked by snapshot (adding an endpoint must update this test) 1`] = `
+{
+  "couponList": {
+    "callerEnv": "dlsitePage",
+    "init": {
+      "cache": "no-store",
+      "credentials": "same-origin",
+      "method": "GET",
+      "mode": "same-origin",
+      "redirect": "manual",
+    },
+    "maxBytes": 1048576,
+    "origin": "https://www.dlsite.com",
+    "params": [],
+    "path": "/home/mypage/coupon/list/ajax",
+  },
+  "dlwatcher": {
+    "callerEnv": "serviceWorker",
+    "init": {
+      "cache": "no-store",
+      "credentials": "omit",
+      "method": "GET",
+      "redirect": "error",
+      "referrerPolicy": "no-referrer",
+    },
+    "maxBytes": 2097152,
+    "origin": "https://dlwatcher.com",
+    "params": [],
+    "path": "/^\\/product\\/(RJ|RE|BJ|VJ)(\\d{6}|\\d{8})\\.json$/",
+  },
+  "productInfo": {
+    "callerEnv": "serviceWorker",
+    "init": {
+      "credentials": "omit",
+      "method": "GET",
+      "redirect": "error",
+      "referrerPolicy": "no-referrer",
+    },
+    "maxBytes": 5242880,
+    "origin": "https://www.dlsite.com",
+    "params": [
+      "product_id",
+      "cdn_cache_min",
+    ],
+    "path": "/maniax/product/info/ajax",
+  },
+}
+`;

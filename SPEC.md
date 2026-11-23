@@ -1,6 +1,6 @@
 # DL_Assistant 專案規格書
 
-> 版本：v0.7（草案）　日期：2026-11-23
+> 版本：v0.8（草案，M1 實作後更新）　日期：2026-11-23
 > 一句話說明：Chrome 擴充功能。把 DLsite 加入購物車的作品自動列入追蹤，定時查價、顯示史低與價格走勢，出現優惠時跳出通知；也能隨時查任一作品的史低，並依你手上的優惠券算出最划算的買法。
 >
 > 變更紀錄見 [CHANGELOG.md](CHANGELOG.md)。規格分成四個檔案，章節編號跨檔案沿用：
@@ -216,6 +216,7 @@ MV3 service worker 閒置 30 秒會被終止，記憶體裡的狀態會消失。
 GET https://www.dlsite.com/maniax/product/info/ajax?product_id=RJ001,RJ002,...&cdn_cache_min=1
 ```
 - 不用登入，用逗號分隔可以一次查多個 ID（最多 100 個）。
+- 回應形狀（2026-11-23 實測）：以編號為 key 的物件；不存在的編號直接不出現；**全部都不存在時是 `[]`**。沒有打折的作品，`discount_rate`、`campaign_id`、`discount_end_date` 三個欄位不出現（不是 `null`）。
 - 會用到的欄位：
 
 | 欄位 | 範例 | 用途 |
@@ -628,10 +629,11 @@ DL_Assistant/
 ├─ package.json
 ├─ eslint.config.js             # §3.2.1、§3.2.5、§3.4、§5.5 要求的規則
 ├─ scripts/check-manifest.ts    # 發佈前檢查 manifest 與打包結果（§7.2）
+├─ scripts/manifest-policy.ts   # manifest 的固定值（權限、CSP、content script），wxt.config.ts 與 check-manifest 共用
 ├─ src/
 │  ├─ entrypoints/
 │  │  ├─ background.ts          # 排程、查價佇列、通知、唯一的 storage 寫入者
-│  │  ├─ dlsite.content.ts      # 偵測加入購物車、購物車 DOM、作品頁徽章、優惠券同步（不用 React，import 白名單見 §3.2.5）
+│  │  ├─ dlsite-content.ts      # 偵測加入購物車、購物車 DOM、作品頁徽章、優惠券同步（不用 React，import 白名單見 §3.2.5；用 defineUnlistedScript，理由見 §3.2.5）
 │  │  ├─ popup/                 # 優惠摘要、查詢這個作品、立即同步、最近的通知
 │  │  ├─ dashboard/             # 儀表板（表格＋走勢圖＋最近的通知）
 │  │  ├─ planner/               # 購買試算頁面
@@ -643,7 +645,10 @@ DL_Assistant/
 │  │  ├─ api/dlwatcher.ts       # DLWatcher 的 zod schema 與轉換
 │  │  ├─ coupons/parse.ts       # 優惠券 API 回應解析（zod、price_sum 正規化、逐筆驗證）
 │  │  ├─ coupons/sync.ts        # 同步結果判斷（§5.4 表格）
-│  │  ├─ ids.ts                 # isWorkId、從網址取作品編號、buildWorkUrl
+│  │  ├─ ids.ts                 # isWorkId、分站列舉、從網址取作品編號、buildWorkUrl、圖片網址正規化
+│  │  ├─ schema.ts              # intIn、optionalText 等共用的 zod 工具（§3.2.3）
+│  │  ├─ models.ts              # §5.3 資料模型的 zod schema 與 Settings 預設值
+│  │  ├─ tracking.ts            # 追蹤清單的加入／移除與查價（background 專用）
 │  │  ├─ nav.ts                 # DlsiteNavUrl 品牌型別、openTab、openPopupWindow、固定的網址常數；唯一可以開分頁／視窗的檔案（§3.4）
 │  │  ├─ text.ts                # htmlToText（DOMParser，只在 content script 使用）
 │  │  ├─ messages.ts            # 訊息的 zod schema 與來源檢查（§3.2.4）
@@ -661,6 +666,7 @@ DL_Assistant/
 │     ├─ NavLink.tsx            # nav.ts 常數的連結
 │     └─ ExportButton.tsx       # 匯出下載（blob: 網址的 <a download>，§3.7）
 └─ tests/                       # Vitest 測試；fixtures/ 放去識別化的 API 回應範例
+   ├─ e2e/                      # Chrome 實機驗證（CDP pipe，不用 puppeteer）：verify-m1.ts、check-dev-csp.ts
    └─ lint-fixtures/            # 每一種違規寫法的範例檔與應該擋下它的規則，CI 確認 ESLint 都會報錯（§3.4）
       └─ content/               # content script 專用的 DOM 寫法範例（§3.2.5）
 ```
@@ -673,7 +679,7 @@ DL_Assistant/
 
 | 階段 | 內容 | 完成標準 |
 |---|---|---|
-| M1 骨架 | WXT 專案、`zod-setup.ts`、ESLint 規則與 `tests/lint-fixtures/`、`apiGet` 與白名單、`nav.ts` 與連結元件、`Settings` 與 storage 存取層、background 呼叫商品 API 查價、手動加入追蹤（`track` 訊息） | 在 popup 手動加一個作品，看得到現價；`assertAllowed` 行為測試、lint 自我測試、`isWorkId`／`buildWorkUrl`／`intIn`／商品 API 的 `"__proto__"` key 測試通過；manifest 檢查腳本通過；CSP 與 `minimum_chrome_version` 被 Chrome 接受；`setAccessLevel` 生效（content script 呼叫 `chrome.storage.local.get` 會失敗）；§3.4 自我測試表的每個範例都以指定的規則報錯 |
+| M1 骨架（✅ 2026-11-23） | WXT 專案、`zod-setup.ts`、ESLint 規則與 `tests/lint-fixtures/`、`apiGet` 與白名單、`nav.ts` 與連結元件、`Settings` 與 storage 存取層、background 呼叫商品 API 查價、手動加入追蹤（`track` 訊息） | 在 popup 手動加一個作品，看得到現價；`assertAllowed` 行為測試、lint 自我測試、`isWorkId`／`buildWorkUrl`／`intIn`／商品 API 的 `"__proto__"` key 測試通過；manifest 檢查腳本通過；CSP 與 `minimum_chrome_version` 被 Chrome 接受；`setAccessLevel` 生效（content script 呼叫 `chrome.storage.local.get` 會失敗）；§3.4 自我測試表的每個範例都以指定的規則報錯 |
 | M2 自動追蹤 | content script（原生 DOM、import 白名單）偵測加入購物車、購物車 DOM 同步、訊息白名單與來源檢查 | 在 DLsite 加入購物車後，追蹤清單自動多一筆；非 `isTrusted` 的點擊不會加入；content script 打包檔不含 `react`、`storage.local`；content script 的 DOM lint 範例都報錯；content script 的 `track` 計入每日上限；訊息來源的拒絕案例與 `setSettings` 多餘欄位被拒絕的測試通過 |
 | M3 史低 | DLWatcher 串接、歷史資料存 IndexedDB、自己的 `priceLog`、合理性檢查、查價佇列與退避 | 每個追蹤作品都有史低和期間；在設定關閉 DLWatcher 後，史低與走勢改用自己的紀錄；查價途中 service worker 被終止，重啟後能接著做；「可買 → 查不到 ×3 → 可買（同價）」得到 3 筆紀錄；「關瀏覽器 3 天、前後同價」得到 2 筆紀錄，中間畫虛線；DLWatcher 合理性檢查的 4 個不通過案例（`lowest` 過高、過低、`start > end`、走勢點超出 0～1）都保留舊資料 |
 | M4 通知 | alarms 排程、§6.1 的處理步驟、去重、一批一次寫入 | 作品打折時收到一次通知；回到原價後再次打折會再通知；§6.1 列出的所有測試情境通過（含查不到一次不重發、一批多件合併成一則、暫停恢復） |
