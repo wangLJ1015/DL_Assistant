@@ -2,7 +2,7 @@
 // content script 不能 import 這個檔案（§3.2.5，ESLint 強制）。
 import { browser } from 'wxt/browser';
 import { z } from 'zod';
-import { nowIso } from './dates';
+import { isoToMs, nowIso } from './dates';
 import {
   dailyAutoAddSchema,
   defaultSettings,
@@ -11,6 +11,7 @@ import {
   type LastCart,
   isoSchema,
   priceSnapshotSchema,
+  workIdSchema,
   settingsSchema,
   trackedItemSchema,
   type PriceSnapshot,
@@ -24,6 +25,7 @@ export const STORAGE_KEYS = {
   snapshots: 'snapshots',
   dailyAutoAdd: 'dailyAutoAdd',
   lastCart: 'lastCart',
+  untracked: 'untracked',
 } as const;
 
 /** storage 讀回的陣列逐筆驗證，失敗的丟棄；以作品編號為 key 放進 Map（§3.2.3）。 */
@@ -81,6 +83,25 @@ export async function readLastCart(): Promise<LastCart | undefined> {
   return r.success ? r.data : undefined;
 }
 
+/**
+ * `untracked`：使用者自己移除的作品與移除時間（§5.3）。購物車頁同步（F2）不會把它們加回來；
+ * 使用者再按一次加入購物車、手動加入時才清掉。最多 1,000 筆、保留 180 天。
+ */
+export const UNTRACKED_MAX = 1000;
+export const UNTRACKED_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+const untrackedSchema = z.array(z.tuple([workIdSchema, isoSchema])).max(UNTRACKED_MAX);
+
+export async function readUntracked(): Promise<Map<string, string>> {
+  const got = await browser.storage.local.get(STORAGE_KEYS.untracked);
+  const r = untrackedSchema.safeParse(got[STORAGE_KEYS.untracked]);
+  return new Map(r.success ? r.data : []);
+}
+
+function pruneUntracked(m: Map<string, string>): [string, string][] {
+  const now = Date.now();
+  return [...m.entries()].filter(([, at]) => now - isoToMs(at) < UNTRACKED_TTL_MS).slice(-UNTRACKED_MAX);
+}
+
 // ---- 寫入（只在 background 使用）----
 
 /**
@@ -103,6 +124,7 @@ export interface StorePatch {
   snapshots?: Map<string, PriceSnapshot>;
   dailyAutoAdd?: DailyAutoAdd;
   lastCart?: LastCart;
+  untracked?: Map<string, string>;
 }
 
 /** 一次 set 寫入多個 key（§4.2 一批一次寫入）。Map 存成陣列。 */
@@ -113,6 +135,7 @@ export async function writeStore(patch: StorePatch): Promise<void> {
   if (patch.snapshots) out[STORAGE_KEYS.snapshots] = [...patch.snapshots.values()];
   if (patch.dailyAutoAdd) out[STORAGE_KEYS.dailyAutoAdd] = patch.dailyAutoAdd;
   if (patch.lastCart) out[STORAGE_KEYS.lastCart] = patch.lastCart;
+  if (patch.untracked) out[STORAGE_KEYS.untracked] = pruneUntracked(patch.untracked);
   if (Object.keys(out).length > 0) await browser.storage.local.set(out);
 }
 

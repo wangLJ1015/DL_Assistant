@@ -173,3 +173,73 @@ describe('seenDocuments', () => {
     expect(await claimDocument('badge', 'b0')).toBe(true);
   });
 });
+
+describe('M2 review fixes', () => {
+  it('cartSnapshot does not re-add a work the user removed; a new cart click does (§5.3 untracked)', async () => {
+    const { untrackItem: untrack } = await import('../src/lib/tracking');
+    const { readUntracked } = await import('../src/lib/storage');
+    await handleContentMessage({ type: 'cartClicked', id: 'RJ01014447' }, sender(WORK));
+    expect(await untrack('RJ01014447')).toEqual({ ok: true });
+    expect((await readUntracked()).has('RJ01014447')).toBe(true);
+
+    await handleContentMessage({ type: 'cartSnapshot', ids: ['RJ01014447', 'RJ123456'] }, sender(CART));
+    expect([...(await readItems()).keys()]).toEqual(['RJ123456']);
+    expect(await readLastCart()).toMatchObject({ ids: ['RJ01014447', 'RJ123456'] });
+
+    await handleContentMessage({ type: 'cartClicked', id: 'RJ01014447' }, sender(WORK));
+    expect((await readItems()).has('RJ01014447')).toBe(true);
+    expect((await readUntracked()).has('RJ01014447')).toBe(false);
+  });
+
+  it('manual add clears the removal record', async () => {
+    const tracking = await import('../src/lib/tracking');
+    const { readUntracked } = await import('../src/lib/storage');
+    await tracking.trackItem('RJ01014447', 'manual', { awaitPrice: true });
+    await tracking.untrackItem('RJ01014447');
+    __resetThrottleForTest();
+    await tracking.trackItem('RJ01014447', 'manual', { awaitPrice: true });
+    expect((await readUntracked()).size).toBe(0);
+  });
+
+  it('replies rateLimited / limit when nothing could be added (§3.2.4)', async () => {
+    await writeStore({ dailyAutoAdd: { date: today(), count: 200, skipped: 0 } });
+    expect(await handleContentMessage({ type: 'cartClicked', id: 'RJ01014447' }, sender(WORK))).toEqual({
+      ok: false,
+      reason: 'rateLimited',
+    });
+    expect(await handleContentMessage({ type: 'track', id: 'RJ01014447' }, sender(WORK))).toEqual({ ok: false, reason: 'rateLimited' });
+    expect(await handleContentMessage({ type: 'cartSnapshot', ids: ['RJ123456'] }, sender(CART))).toEqual({
+      ok: false,
+      reason: 'rateLimited',
+    });
+    // 已追蹤的作品不算被擋
+    await writeStore({ dailyAutoAdd: { date: today(), count: 0, skipped: 0 } });
+    await handleContentMessage({ type: 'cartClicked', id: 'RJ01014447' }, sender(WORK));
+    await writeStore({ dailyAutoAdd: { date: today(), count: 200, skipped: 0 } });
+    expect(await handleContentMessage({ type: 'cartClicked', id: 'RJ01014447' }, sender(WORK))).toEqual({ ok: true });
+  });
+
+  it('a partially accepted cartSnapshot is ok', async () => {
+    expect(await handleContentMessage({ type: 'cartSnapshot', ids: ids(60) }, sender(CART))).toEqual({ ok: true });
+  });
+
+  it('replies limit when the list is full', async () => {
+    const items = new Map(
+      ids(1000).map((id) => [
+        id,
+        {
+          id,
+          site: 'maniax',
+          title: '',
+          imageUrl: '',
+          addedAt: '2026-11-23T00:00:00.000Z',
+          source: 'manual' as const,
+          autoAdded: false,
+          paused: false,
+        },
+      ]),
+    );
+    await writeStore({ items });
+    expect(await handleContentMessage({ type: 'cartClicked', id: 'RJ01014447' }, sender(WORK))).toEqual({ ok: false, reason: 'limit' });
+  });
+});

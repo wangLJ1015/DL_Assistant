@@ -5,18 +5,21 @@ import { __regexForTest, isCartPageUrl, workIdFromCartHref } from '../src/lib/se
 const WORK_PAGE = 'https://www.dlsite.com/home/work/=/product_id/RJ01014447.html';
 const LIST_PAGE = 'https://www.dlsite.com/home/ranking/week';
 
-/** 只實作用到的 DOM 方法。`selectors` 是這個元素符合的選擇器（逐字比對整串選擇器）。 */
-function el(attrs: Record<string, string>, selectors: string[] = [], parent: ElementLike | null = null): ElementLike {
-  const self: ElementLike = {
+/**
+ * 只實作用到的 DOM 成員。`selectors` 是這個元素符合的選擇器（逐字比對整串選擇器），
+ * `descendants` 是子孫元素的數量。
+ */
+function el(attrs: Record<string, string>, selectors: string[] = [], parent: ElementLike | null = null, descendants = 0): ElementLike {
+  return {
     getAttribute: (n) => (Object.hasOwn(attrs, n) ? attrs[n]! : null),
     matches: (s) => selectors.includes(s),
-    closest: (s) => (selectors.includes(s) ? self : (parent?.closest(s) ?? null)),
+    parentElement: parent,
+    querySelectorAll: () => ({ length: descendants }),
   };
-  return self;
 }
 
-const CART_BUTTON = 'a.btn_cart, button.btn_cart, [data-ga4-ref="cart_add"]';
-const PAGE_BUTTON = '[data-ga4-ref="cart_add"]';
+const LINK = 'a.btn_cart[href]';
+const PAGE_BUTTON = 'button.btn_cart[data-ga4-ref="cart_add"]';
 
 describe('selectors (2026-11-23 DLsite)', () => {
   it.each([
@@ -61,38 +64,58 @@ describe('selectors (2026-11-23 DLsite)', () => {
 });
 
 describe('F1 cart button → work id', () => {
-  it('reads the id from a list-page button href', () => {
-    const a = el({ href: '/home/cart/=/product_id/RJ01760999.html', class: 'btn_cart' }, [CART_BUTTON]);
-    // 點到按鈕裡的子元素也算
-    const inner = el({}, [], a);
-    expect(cartIdFromTarget(inner, 'RJ01014447', WORK_PAGE)).toBe('RJ01760999');
+  it('reads the id from a list-page link href, also when a child of the link is clicked', () => {
+    const a = el({ href: '/home/cart/=/product_id/RJ01760999.html' }, [LINK]);
+    expect(cartIdFromTarget(a, 'RJ01014447', WORK_PAGE)).toBe('RJ01760999');
+    expect(cartIdFromTarget(el({}, [], a), 'RJ01014447', WORK_PAGE)).toBe('RJ01760999');
   });
 
-  it('uses the page id only for the work page own button (no href)', () => {
-    const button = el({ 'data-ga4-ref': 'cart_add' }, [CART_BUTTON, PAGE_BUTTON]);
+  it('uses the page id only for the work page own <button>', () => {
+    const button = el({ 'data-ga4-ref': 'cart_add' }, [PAGE_BUTTON]);
+    expect(cartIdFromTarget(button, 'RJ01014447', WORK_PAGE)).toBe('RJ01014447');
+    expect(cartIdFromTarget(el({}, [], button, 0), 'RJ01014447', WORK_PAGE)).toBe('RJ01014447');
+    expect(cartIdFromTarget(button, undefined, LIST_PAGE)).toBeUndefined();
+  });
+
+  it('never reads an href from the page button', () => {
+    // 頁面把 href 加到 <button> 上：仍然只用頁面編號
+    const button = el({ 'data-ga4-ref': 'cart_add', href: '/home/cart/=/product_id/RJ66666666.html' }, [PAGE_BUTTON]);
     expect(cartIdFromTarget(button, 'RJ01014447', WORK_PAGE)).toBe('RJ01014447');
     expect(cartIdFromTarget(button, undefined, LIST_PAGE)).toBeUndefined();
   });
 
   it('gives up instead of guessing', () => {
-    // 有 href 但不是加入購物車或作品頁的網址：不退回頁面網址
-    const weird = el({ href: 'https://evil.example/x' }, [CART_BUTTON]);
-    expect(cartIdFromTarget(weird, 'RJ01014447', WORK_PAGE)).toBeUndefined();
-    // button.btn_cart 但不是作品頁本身的按鈕：沒有 href 也不用頁面網址
-    const other = el({}, [CART_BUTTON]);
-    expect(cartIdFromTarget(other, 'RJ01014447', WORK_PAGE)).toBeUndefined();
+    // a.btn_cart 的 href 不是加入購物車的路徑（作品頁網址、站外網址）
+    expect(
+      cartIdFromTarget(el({ href: 'https://www.dlsite.com/home/work/=/product_id/RJ01760999.html' }, [LINK]), undefined, LIST_PAGE),
+    ).toBeUndefined();
+    expect(
+      cartIdFromTarget(el({ href: 'https://evil.example/home/cart/=/product_id/RJ01760999.html' }, [LINK]), 'RJ01014447', WORK_PAGE),
+    ).toBeUndefined();
+    expect(cartIdFromTarget(el({ href: '/home/cart/=/product_id/RJ' + '1'.repeat(3000) }, [LINK]), undefined, LIST_PAGE)).toBeUndefined();
     // 不是購物車按鈕
     expect(cartIdFromTarget(el({ href: '/home/cart/=/product_id/RJ01760999.html' }), 'RJ01014447', WORK_PAGE)).toBeUndefined();
   });
 
-  it('accepts a work-page href on a cart button', () => {
-    const a = el({ href: 'https://www.dlsite.com/home/work/=/product_id/RJ01760999.html' }, [CART_BUTTON]);
-    expect(cartIdFromTarget(a, undefined, LIST_PAGE)).toBe('RJ01760999');
+  it('only looks a few levels up from the click target (M2 review: page wrapped in a cart link)', () => {
+    const wrapper = el({ href: '/home/cart/=/product_id/RJ66666666.html' }, [LINK]);
+    let t: ElementLike = wrapper;
+    for (let i = 0; i < 3; i++) t = el({}, [], t);
+    expect(cartIdFromTarget(t, undefined, LIST_PAGE)).toBe('RJ66666666'); // 3 層內
+    expect(cartIdFromTarget(el({}, [], t), undefined, LIST_PAGE)).toBeUndefined(); // 4 層
+  });
+
+  it('rejects a "button" that contains many elements (M2 review: <html> turned into a cart button)', () => {
+    const html = el({ href: '/home/cart/=/product_id/RJ66666666.html', 'data-ga4-ref': 'cart_add' }, [LINK], null, 500);
+    expect(cartIdFromTarget(el({}, [], html), undefined, LIST_PAGE)).toBeUndefined();
+    const page = el({ 'data-ga4-ref': 'cart_add' }, [PAGE_BUTTON], null, 6);
+    expect(cartIdFromTarget(page, 'RJ01014447', WORK_PAGE)).toBeUndefined();
+    expect(cartIdFromTarget(el({ 'data-ga4-ref': 'cart_add' }, [PAGE_BUTTON], null, 5), 'RJ01014447', WORK_PAGE)).toBe('RJ01014447');
   });
 });
 
 describe('F1 click events (§3.2.4)', () => {
-  const target = el({ href: '/home/cart/=/product_id/RJ01760999.html' }, [CART_BUTTON]);
+  const target = el({ href: '/home/cart/=/product_id/RJ01760999.html' }, [LINK]);
   it('only handles trusted clicks', () => {
     expect(cartIdFromEvent({ isTrusted: true, type: 'click', button: 0, target }, undefined, LIST_PAGE)).toBe('RJ01760999');
     expect(cartIdFromEvent({ isTrusted: false, type: 'click', button: 0, target }, undefined, LIST_PAGE)).toBeUndefined();
@@ -103,7 +126,7 @@ describe('F1 click events (§3.2.4)', () => {
   });
   it('ignores non-element targets', () => {
     expect(cartIdFromEvent({ isTrusted: true, type: 'click', button: 0, target: null }, undefined, LIST_PAGE)).toBeUndefined();
-    expect(cartIdFromEvent({ isTrusted: true, type: 'click', button: 0, target: { closest: 1 } }, undefined, LIST_PAGE)).toBeUndefined();
+    expect(cartIdFromEvent({ isTrusted: true, type: 'click', button: 0, target: { matches: 1 } }, undefined, LIST_PAGE)).toBeUndefined();
   });
 });
 

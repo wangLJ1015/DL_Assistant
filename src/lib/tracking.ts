@@ -6,7 +6,7 @@ import { nowIso } from './dates';
 import { isWorkId } from './ids';
 import { MAX_NOT_FOUND_COUNT, MAX_TRACKED_ITEMS, type Settings, type TrackedItem } from './models';
 import type { WriteReply } from './messages';
-import { readItems, readSettings, readSnapshots, writeQueue, writeStore } from './storage';
+import { readItems, readSettings, readSnapshots, readUntracked, writeQueue, writeStore } from './storage';
 
 const PRODUCT_API_INTERVAL_MS = 1000; // §3.1 請求之間間隔至少 1 秒
 const PRODUCT_API_BATCH = 100;
@@ -54,7 +54,10 @@ export async function trackItem(id: string, source: TrackSource, opts: TrackOpti
     if (items.has(id)) return { ok: true, check: !(await readSnapshots()).has(id) };
     if (items.size >= MAX_TRACKED_ITEMS) return { ok: false, reason: 'limit' };
     items.set(id, newTrackedItem(id, source));
-    await writeStore({ items });
+    // 使用者自己加回來：清掉移除紀錄
+    const untracked = await readUntracked();
+    const hadTombstone = untracked.delete(id);
+    await writeStore({ items, ...(hadTombstone ? { untracked } : {}) });
     return { ok: true, check: true };
   });
   if (reply.ok && reply.check) {
@@ -67,10 +70,13 @@ export async function trackItem(id: string, source: TrackSource, opts: TrackOpti
 
 export async function untrackItem(id: string): Promise<WriteReply> {
   return writeQueue(async () => {
-    const [items, snapshots] = await Promise.all([readItems(), readSnapshots()]);
+    const [items, snapshots, untracked] = await Promise.all([readItems(), readSnapshots(), readUntracked()]);
     if (!items.delete(id)) return { ok: true };
     snapshots.delete(id);
-    await writeStore({ items, snapshots });
+    // 移除紀錄：購物車頁同步不會再把它加回來（§5.3 untracked）
+    untracked.delete(id);
+    untracked.set(id, nowIso());
+    await writeStore({ items, snapshots, untracked });
     return { ok: true };
   });
 }

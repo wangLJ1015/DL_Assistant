@@ -28,8 +28,11 @@ function note(name: string, detail: string) {
 
 // ---------------- 假的 DLsite 頁面 ----------------
 
+// 每一頁都放 DOM clobbering 的陷阱（M2 審查）：isolated world 的 globalThis.browser／chrome 不能被這些元素蓋掉
+const CLOBBER = `<form id="browser"><input name="runtime" id="x"></form><form id="chrome"><input name="runtime" id="y"></form>`;
+
 const page = (body: string) =>
-  `<!doctype html><meta charset="utf-8"><title>fake DLsite</title><body>${body}<script>` +
+  `<!doctype html><meta charset="utf-8"><title>fake DLsite</title><body>${CLOBBER}${body}<script>` +
   // 頁面自己的腳本：擋掉連結導覽（真的 DLsite 由 JS 處理加入購物車），並提供「頁面腳本偽造點擊」的入口
   `document.addEventListener('click', (e) => { if (e.target.closest('a')) e.preventDefault(); });` +
   `</script>`;
@@ -42,7 +45,10 @@ const FAKE: Record<string, string> = {
       `<a href="/home/cart/=/product_id/RJ01760999.html" class="btn_cart" id="rec" style="display:inline-block;width:200px;height:40px">カートに入れる</a>` +
       `</p></li></ul></div>` +
       `<a href="/home/cart/=/product_id/RJ00000002.html" class="btn_cart" id="forged" style="display:inline-block;width:200px;height:40px">偽造</a>` +
-      `<a href="/home/cart/=/product_id/RJ00000003.html" class="btn_cart" id="after-push" style="display:inline-block;width:200px;height:40px">pushState 後</a>`,
+      `<a href="/home/cart/=/product_id/RJ00000003.html" class="btn_cart" id="after-push" style="display:inline-block;width:200px;height:40px">pushState 後</a>` +
+      // 頁面把整塊內容包進加入購物車連結：深處的點擊不能算（M2 審查）
+      `<a href="/home/cart/=/product_id/RJ55555555.html" class="btn_cart"><div><div><div><div><p id="deep" style="height:40px">深處</p></div></div></div></div></a>` +
+      `<p id="plain" style="height:40px">無關的段落</p>`,
   ),
   // 購物車頁：推薦區也有 data-product_id，不能被讀進來
   '/home/cart/': page(
@@ -52,9 +58,25 @@ const FAKE: Record<string, string> = {
       `<li class="cart_list_item _cart_items" data-product-id="__proto__">c</li>` +
       `</ul><ul class="swiper-wrapper"><li><div data-product_id="RJ999999" data-product-id="RJ999999">rec</div></li></ul>`,
   ),
-  '/home/mypage/': page('<p>mypage</p>'),
-  '/home/pay/member/=/relayout/cart/buynow/1/product_id/RJ01014447/': page('<p>pay</p>'),
+  // 頁面用 JS 晚一點才渲染購物車清單
+  '/maniax/cart/': page(
+    `<div id="later"></div><script>setTimeout(() => { document.getElementById('later').innerHTML = '<ul class="cart_list"><li class="cart_list_item" data-product-id="RJ01234567">late</li></ul>'; }, 1500);</script>`,
+  ),
+  // 清單元素一直沒出現（選擇器失效）：不能送出空的 cartSnapshot
+  '/books/cart/': page('<p>no cart list</p>'),
 };
+const EXCLUDED = [
+  '/home/mypage',
+  '/home/mypage/',
+  '/home/mypage/setting',
+  '/home/pay',
+  '/home/pay/member/=/relayout/cart/buynow/1/product_id/RJ01014447/',
+  '/home/login',
+  '/home/login/=/skip_register/1',
+  '/home/regist',
+  '/home/regist/user',
+];
+for (const path of EXCLUDED) FAKE[path] = page(`<p>${path}</p>`);
 
 async function main() {
   const profile = mkdtempSync(join(tmpdir(), 'dl-assistant-verify-m2-'));
@@ -145,9 +167,11 @@ async function main() {
     let sw = await attachSw();
 
     // ---- 分頁 ----
+    const tabTargets = new Map<string, string>();
     const openTab = async (url = 'about:blank') => {
       const { targetId } = (await cdp.send('Target.createTarget', { url: 'about:blank' })) as { targetId: string };
       const { sessionId } = (await cdp.send('Target.attachToTarget', { targetId, flatten: true })) as { sessionId: string };
+      tabTargets.set(sessionId, targetId);
       await intercept(sessionId);
       await cdp.send('Runtime.enable', {}, sessionId);
       await cdp.send('Page.enable', {}, sessionId);
@@ -221,15 +245,37 @@ async function main() {
     );
     record('推薦區（列表樣式）的按鈕從 href 取編號（F1）', rec === true, JSON.stringify(await itemIds()));
 
+    // ---- M2 審查：頁面不能把任意點擊變成加入購物車 ----
+    await evaluate(
+      cdp,
+      work,
+      `document.documentElement.setAttribute('data-ga4-ref', 'cart_add'); document.documentElement.setAttribute('href', '/home/cart/=/product_id/RJ66666666.html'); document.documentElement.className = 'btn_cart'; true`,
+    );
+    await trustedClick(work, '#plain');
+    await trustedClick(work, '#deep');
+    await sleep(1000);
+    const hijacked = (await itemIds()).filter((id) => id === 'RJ66666666' || id === 'RJ55555555');
+    record(
+      '頁面把 <html> 改成購物車按鈕、或把內容包進購物車連結，點擊其他地方都不會加入（M2 審查）',
+      hijacked.length === 0,
+      JSON.stringify(hijacked),
+    );
+    record(
+      '頁面有 <form id="browser">／<form id="chrome"> 時訊息照常送出（DOM clobbering，M2 審查）',
+      (await itemIds()).includes('RJ01760999'),
+      'F1 的訊息在每一頁都有 clobbering 陷阱的情況下送達',
+    );
+
     // ---- §10.3 sender.url 在 history.pushState 之後 ----
     await evaluate(cdp, work, `history.pushState({}, '', '/home/cart/'); true`);
     await trustedClick(work, '#after-push');
     await sleep(800);
     const senders = (await evaluate(cdp, sw, `__m2`)) as { type: string; id?: string; url: string }[];
     const pushed = senders.find((s) => s.id === 'RJ00000003');
-    note(
-      'history.pushState 之後的 sender.url（§10.3）',
-      pushed ? `${pushed.url}（${pushed.url.endsWith('/home/cart/') ? '會跟著改變' : '不會改變'}）` : '沒有收到訊息',
+    record(
+      'history.pushState 之後 sender.url 仍是文件載入時的網址（§10.3）',
+      pushed?.url === 'https://www.dlsite.com/home/work/=/product_id/RJ01014447.html',
+      pushed ? pushed.url : '沒有收到訊息',
     );
 
     // ---- §10.3 onMessage 非同步回應：service worker 冷啟動 ----
@@ -261,23 +307,47 @@ async function main() {
     );
     sw = await attachSw();
 
-    // 重新整理同一頁（新的 documentId）不會重複加入；同一份文件也只接受一次 —— 由單元測試涵蓋
+    // ---- 購物車清單晚一點才渲染（M2 審查）----
+    const late = await openTab();
+    await loadAndWait(late, 'https://www.dlsite.com/maniax/cart/');
+    const lateCart = await poll(
+      async () => {
+        const c = await store();
+        return JSON.stringify(c.lastCart?.ids) === JSON.stringify(['RJ01234567']) ? c : undefined;
+      },
+      15_000,
+      'late cart',
+    ).catch(() => store());
     record(
-      '每日計數只算新加入的作品（§3.2.4）',
-      (await store()).dailyAutoAdd?.count === (await itemIds()).length,
-      JSON.stringify((await store()).dailyAutoAdd),
+      '購物車清單用 JS 晚一點才出現時，等它出現再讀（M2 審查）',
+      JSON.stringify(lateCart.lastCart?.ids) === JSON.stringify(['RJ01234567']),
+      JSON.stringify(lateCart.lastCart),
     );
 
-    // ---- 排除路徑：結帳、帳號頁沒有 content script（§3.2.5）----
-    for (const url of [
-      'https://www.dlsite.com/home/mypage/',
-      'https://www.dlsite.com/home/pay/member/=/relayout/cart/buynow/1/product_id/RJ01014447/',
-    ]) {
+    // ---- 清單元素一直沒出現：不送空的 cartSnapshot（不覆蓋 lastCart）----
+    const missing = await openTab();
+    await loadAndWait(missing, 'https://www.dlsite.com/books/cart/');
+    await waitContent(missing);
+    await sleep(11_500); // content script 最多等 10 秒
+    const sentFromMissing = ((await evaluate(cdp, sw, `__m2`)) as { type: string; url: string }[]).filter((m) =>
+      m.url.endsWith('/books/cart/'),
+    );
+    record(
+      '購物車清單一直沒出現時不送 cartSnapshot，lastCart 維持原樣（M2 審查）',
+      sentFromMissing.length === 0 && JSON.stringify((await store()).lastCart?.ids) === JSON.stringify(['RJ01234567']),
+      `sent=${sentFromMissing.length}`,
+    );
+
+    // ---- 排除路徑：結帳、帳號頁沒有 content script（§3.2.5），結尾有沒有斜線都一樣（M2 審查）----
+    const injected: string[] = [];
+    for (const path of EXCLUDED) {
       const t = await openTab();
-      await loadAndWait(t, url);
-      await sleep(1500);
-      record(`排除路徑不注入 content script：${new URL(url).pathname.slice(0, 40)}`, contentContext(t) === undefined);
+      await loadAndWait(t, `https://www.dlsite.com${path}`);
+      await sleep(800);
+      if (contentContext(t) !== undefined) injected.push(path);
+      await cdp.send('Target.closeTarget', { targetId: tabTargets.get(t)! });
     }
+    record(`排除路徑都不注入 content script（${EXCLUDED.length} 個網址）`, injected.length === 0, injected.join(', ') || 'none');
 
     // ---- popup 顯示「自動加入」----
     await cdp.send('Page.reload', {}, ext);

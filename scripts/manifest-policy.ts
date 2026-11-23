@@ -26,13 +26,17 @@ export const CONTENT_SCRIPT_MATCHES = ['https://www.dlsite.com/*'] as const;
 /**
  * §3.2.5：結帳、付款、帳號相關頁面不注入 content script（2026-11-23 實測的路徑，§10.3）。
  * 立即購買：/<分站>/pay/…；マイページ（含帳號設定、優惠券）：/<分站>/mypage/…；登入：/<分站>/login/…；註冊：/<分站>/regist/…。
+ * 路徑結尾不要求斜線（寫成 「…/mypage」 後面直接接萬用字元）：要求斜線的寫法擋不到 /home/mypage 這種網址（M2 審查重現）。
+ * 代價是 /home/guide/payment 之類名稱相近的頁面也會被排除（只是少了 content script，沒有安全影響）。
  * 購物車頁（/<分站>/cart/）要讀作品清單（F2），不排除。
  */
 export const CONTENT_SCRIPT_EXCLUDE_MATCHES = [
-  'https://www.dlsite.com/*/pay/*',
-  'https://www.dlsite.com/*/mypage/*',
+  'https://www.dlsite.com/*/pay*',
+  'https://www.dlsite.com/*/mypage*',
   'https://www.dlsite.com/*/login*',
-  'https://www.dlsite.com/*/regist/*',
+  'https://www.dlsite.com/*/regist*',
 ] as const;
+/** 頁面還沒有任何元素時執行，先取出 chrome.runtime（DOM clobbering，§3.2.5）。 */
+export const CONTENT_SCRIPT_RUN_AT = 'document_start';
 /** src/entrypoints/dlsite-content.ts 的打包結果。 */
 export const CONTENT_SCRIPT_FILE = 'dlsite-content.js';

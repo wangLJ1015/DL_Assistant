@@ -2,10 +2,12 @@
 // 只檢查正式建置（`wxt build`）；WXT 開發模式會放寬 CSP，不能拿去發佈。
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
+import { sha256 } from './content-modules-plugin.ts';
 import {
   CONTENT_SCRIPT_EXCLUDE_MATCHES,
   CONTENT_SCRIPT_FILE,
   CONTENT_SCRIPT_MATCHES,
+  CONTENT_SCRIPT_RUN_AT,
   MANIFEST_CSP,
   MANIFEST_HOST_PERMISSIONS,
   MANIFEST_PERMISSIONS,
@@ -56,7 +58,8 @@ if (!ec || !sameList(ec.ids, []) || !sameList(ec.matches, []) || Object.keys(ec)
 }
 
 const cs = manifest.content_scripts as
-  { matches?: unknown; exclude_matches?: unknown; js?: unknown; css?: unknown; all_frames?: unknown; world?: unknown }[] | undefined;
+  | { matches?: unknown; exclude_matches?: unknown; run_at?: unknown; js?: unknown; css?: unknown; all_frames?: unknown; world?: unknown }[]
+  | undefined;
 if (!Array.isArray(cs) || cs.length !== 1) {
   fail('exactly one content_scripts entry is expected');
 } else {
@@ -65,6 +68,7 @@ if (!Array.isArray(cs) || cs.length !== 1) {
   if (!sameList(c!.exclude_matches, CONTENT_SCRIPT_EXCLUDE_MATCHES)) fail('content script exclude_matches differ (§3.2.5)');
   if (!sameList(c!.js, [CONTENT_SCRIPT_FILE])) fail(`content script must be ${CONTENT_SCRIPT_FILE}`);
   if (c!.css !== undefined) fail('content script must not load CSS files (§3.2.5)');
+  if (c!.run_at !== CONTENT_SCRIPT_RUN_AT) fail(`content script must run at ${CONTENT_SCRIPT_RUN_AT} (DOM clobbering, §3.2.5)`);
   if (c!.all_frames !== false) fail('content script must set all_frames: false');
   if (c!.world !== undefined && c!.world !== 'ISOLATED') fail('content script must run in the isolated world');
 }
@@ -121,6 +125,8 @@ if (!existsSync(contentPath)) {
     [/(?<!new\s+)url\s*\(|@import|image-set\s*\(/i, 'url( / @import / image-set('],
     [/setAttributeNode|createAttribute|insertRule|CSSStyleSheet|adoptedStyleSheets/, 'attribute node / stylesheet API'],
     [/\.on(message|click|error|load)\s*=/, 'on* event handler property'],
+    // isolated world 沒有 browser 全域，頁面能用 <form id="browser"> 蓋掉它（v0.11，M2 審查）；content script 一律用 chrome
+    [/globalThis\.browser|\bbrowser\??\.runtime/, 'browser global (DOM clobbering; use chrome)'],
   ];
   for (const [re, name] of forbidden) if (re.test(text)) fail(`${CONTENT_SCRIPT_FILE}: contains ${name}`);
 }
@@ -134,14 +140,24 @@ if (!existsSync(modulesPath)) {
 } else {
   const report = JSON.parse(readFileSync(modulesPath, 'utf8')) as {
     file?: string;
+    sha256?: string;
     modules?: { id: string; pkg: string | null; bytes: number }[];
   };
-  const baseline = JSON.parse(readFileSync(join(ROOT, 'scripts/content-modules.baseline.json'), 'utf8')) as { packages: string[] };
+  const baseline = JSON.parse(readFileSync(join(ROOT, 'scripts/content-modules.baseline.json'), 'utf8')) as {
+    packages: string[];
+    files: string;
+  };
+  const allowedFile = new RegExp(baseline.files);
   if (report.file !== CONTENT_SCRIPT_FILE || !Array.isArray(report.modules)) fail('content-modules.json is malformed');
+  // 清單必須是這一次建置的結果（本機殘留的舊檔不算）
+  if (existsSync(contentPath) && report.sha256 !== sha256(readFileSync(contentPath, 'utf8')))
+    fail('content-modules.json does not match the built content script (stale report; rebuild)');
   for (const m of report.modules ?? []) {
     if (m.pkg !== null && !contentPackages.includes(m.pkg)) contentPackages.push(m.pkg);
     if (m.pkg !== null && !baseline.packages.includes(m.pkg))
       fail(`${CONTENT_SCRIPT_FILE}: new package "${m.pkg}" (${m.id}); review it, then add it to scripts/content-modules.baseline.json`);
+    // 專案內的檔案也比對（間接 import 進來的 lib 檔案，lint 的白名單看不到）
+    if (m.pkg === null && !allowedFile.test(m.id)) fail(`${CONTENT_SCRIPT_FILE}: unexpected project module ${m.id} (§3.2.5 whitelist)`);
   }
 }
 

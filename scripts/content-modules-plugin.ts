@@ -1,6 +1,7 @@
 // §3.2.5：建置時列出 content script 打包進去的模組，寫到 .output/content-modules.json（不放進擴充功能）。
 // check-manifest 讀它，和 scripts/content-modules.baseline.json 比對：出現沒列過的套件就失敗，要人工確認。
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { CONTENT_SCRIPT_FILE } from './manifest-policy.ts';
 
@@ -36,19 +37,29 @@ interface ChunkLike {
   modules?: Record<string, { renderedLength: number }>;
 }
 
+/** 打包檔內容的 SHA-256：check-manifest 用它確認清單對應的是這一次的建置（不是殘留的舊檔）。 */
+export const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
+
 export function contentModulesPlugin() {
   return {
     name: 'dl-assistant:content-modules',
     apply: 'build' as const,
-    generateBundle(_options: unknown, bundle: Record<string, ChunkLike>) {
+    // writeBundle：檔案已經寫到磁碟（WXT 在 generateBundle 之後還會改寫），雜湊值取實際的檔案。
+    writeBundle(options: { dir?: string }, bundle: Record<string, ChunkLike>) {
       const chunk = Object.values(bundle).find((c) => c.type === 'chunk' && c.fileName === CONTENT_SCRIPT_FILE);
-      if (!chunk?.modules) return;
+      if (!chunk?.modules || !options.dir) return;
       const modules: ContentModule[] = Object.entries(chunk.modules)
         .map(([rawId, m]) => ({ ...describeModule(rawId), bytes: m.renderedLength }))
         .filter((m) => m.bytes > 0)
         .sort((a, b) => a.id.localeCompare(b.id));
+      const built = readFileSync(join(options.dir, CONTENT_SCRIPT_FILE), 'utf8');
       mkdirSync(dirname(CONTENT_MODULES_FILE), { recursive: true });
-      writeFileSync(CONTENT_MODULES_FILE, `${JSON.stringify({ file: CONTENT_SCRIPT_FILE, modules }, null, 2)}\n`);
+      const report = { file: CONTENT_SCRIPT_FILE, sha256: sha256(built), modules };
+      writeFileSync(
+        CONTENT_MODULES_FILE,
+        `${JSON.stringify(report, null, 2)}
+`,
+      );
     },
   };
 }

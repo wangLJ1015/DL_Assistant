@@ -149,6 +149,20 @@ const CONTENT_SYNTAX = [
   sel(`CallExpression[callee.property.name='addEventListener'][arguments.0.value='message']`, '§3.2.4：content script 不監聽 message 事件'),
   sel(`CallExpression[callee.property.name='postMessage']`, '§3.2.4：content script 不使用 postMessage'),
   sel(`NewExpression[callee.name='CustomEvent']`, '§3.2.4：content script 不派送自訂 DOM 事件'),
+  // v0.11（M2 審查）：上面靠名稱比對的規則可以用轉型、非 null 斷言或其他物件繞過，content script 一律不碰 storage
+  sel(`MemberExpression[property.name='storage']`, '§3.2.5：content script 禁止使用 storage'),
+  sel(`Literal[value='storage']`, '§3.2.5：content script 禁止使用 storage'),
+  sel(`MemberExpression[property.name=${CHROME}]`, '§3.2.5：content script 直接用 chrome，不要經過 globalThis／window'),
+  // 會以 DLsite 頁面的身分發出帶 cookie 請求的建構式
+  sel(
+    `NewExpression[callee.name=/^(Audio|Image|Option|FontFace|Worker|SharedWorker|Request|DOMParser|XMLHttpRequest|EventSource|WebSocket)$/]`,
+    '§3.2.5：content script 不建立會載入資源的物件',
+  ),
+  sel(
+    `CallExpression[callee.property.name=/^(createContextualFragment|insertAdjacentHTML)$/]`,
+    '§3.2.1：禁止 createContextualFragment／insertAdjacentHTML',
+  ),
+  sel(`ImportExpression`, '§3.2.5：content script 不用動態 import'),
 ];
 
 const syntax = (...groups) => ['error', ...groups.flat()];
@@ -164,6 +178,16 @@ const NAV_GLOBALS = [
   { name: 'open', message: '§3.4：禁止 open()' },
   { name: 'location', message: '§3.4：禁止直接使用 location' },
   { name: 'navigation', message: '§3.4：禁止直接使用 navigation' },
+];
+
+/**
+ * content script 專用（v0.11，M2 審查）：
+ * - browser：Chrome 的 isolated world 沒有這個全域，頁面放 <form id="browser"> 就能蓋掉它（DOM clobbering），一律用 chrome。
+ * - Reflect：Reflect.get(chrome, 'stor' + 'age') 能繞過名稱比對。
+ */
+const CONTENT_GLOBALS = [
+  { name: 'browser', message: '§3.2.5：content script 用 chrome（browser 可以被頁面的 DOM 元素蓋掉）' },
+  { name: 'Reflect', message: '§3.2.5：content script 不用 Reflect（會繞過名稱比對的規則）' },
 ];
 
 // ---- no-restricted-properties ----
@@ -185,7 +209,7 @@ const JSX_RUNTIME_PATHS = [
 ];
 /** §3.2.5 content script 可以 import 的模組（白名單以外一律禁止）。 */
 const CONTENT_ALLOWED = 'ids|text|selectors|messages|zod-setup|api/endpoints|coupons/parse|dates|schema|badge-style';
-const CONTENT_IMPORT_BASE = `(?!(?:(?:\\.\\.?/)+lib/|@/lib/)(?:${CONTENT_ALLOWED})$)(?!(?:\\.\\./)+content/[a-z-]+$)(?!zod$)(?!wxt/utils/define-unlisted-script$)(?!wxt/browser$)`;
+const CONTENT_IMPORT_BASE = `(?!(?:(?:\\.\\.?/)+lib/|@/lib/)(?:${CONTENT_ALLOWED})$)(?!(?:\\.\\./)+content/[a-z-]+$)(?!zod$)(?!wxt/utils/define-unlisted-script$)`;
 /** src/content/ 底下的檔案可以互相 import（./xxx）。 */
 const CONTENT_IMPORT_REGEX = `^${CONTENT_IMPORT_BASE}(?!\\./[a-z-]+$)`;
 /** 入口檔在 src/entrypoints/，./xxx 會指到 background 等其他入口，所以不允許（只能用 ../content/xxx）。 */
@@ -277,6 +301,7 @@ export default tseslint.config(
     files: CONTENT_FILES,
     rules: {
       'no-restricted-syntax': syntax(NAV_SYNTAX, BRAND_SYNTAX, DATE_SYNTAX, COMMON_SYNTAX, CONTENT_SYNTAX),
+      'no-restricted-globals': ['error', ...FETCH_GLOBAL, ...NET_GLOBALS, ...NAV_GLOBALS, ...CONTENT_GLOBALS],
       'no-restricted-imports': [
         'error',
         {

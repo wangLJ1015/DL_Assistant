@@ -4,6 +4,7 @@ import {
   CONTENT_SCRIPT_EXCLUDE_MATCHES,
   CONTENT_SCRIPT_FILE,
   CONTENT_SCRIPT_MATCHES,
+  CONTENT_SCRIPT_RUN_AT,
   DEV_MANIFEST_CSP,
   MANIFEST_CSP,
   MANIFEST_HOST_PERMISSIONS,
@@ -35,7 +36,9 @@ export default defineConfig({
         exclude_matches: [...CONTENT_SCRIPT_EXCLUDE_MATCHES],
         js: [CONTENT_SCRIPT_FILE],
         all_frames: false,
-        run_at: 'document_idle',
+        // document_start：頁面還沒有任何元素時先取出 chrome.runtime（之後頁面能用 <form id="chrome"> 蓋掉 chrome，
+        // M2 審查後實測），DOM 相關的工作等 DOMContentLoaded 才開始（src/entrypoints/dlsite-content.ts）。
+        run_at: CONTENT_SCRIPT_RUN_AT,
       },
     ],
   }),

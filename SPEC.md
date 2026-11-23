@@ -1,6 +1,6 @@
 # DL_Assistant 專案規格書
 
-> 版本：v0.10（草案，M2 實作後更新）　日期：2026-11-23
+> 版本：v0.11（草案，M2 審查後更新）　日期：2026-11-23
 > 一句話說明：Chrome 擴充功能。把 DLsite 加入購物車的作品自動列入追蹤，定時查價、顯示史低與價格走勢，出現優惠時跳出通知；也能隨時查任一作品的史低，並依你手上的優惠券算出最划算的買法。
 >
 > 變更紀錄見 [CHANGELOG.md](CHANGELOG.md)。規格分成四個檔案，章節編號跨檔案沿用：
@@ -53,8 +53,11 @@
 
 **F1 偵測方式**
 - content script 在 `document` 上以 capture 階段監聽 `click` 與 `auxclick`（中鍵、Ctrl＋點擊開新分頁也要偵測），用 `selectors.ts` 的選擇器判斷目標是不是加入購物車按鈕。用事件委派，動態載入的按鈕也偵測得到。只處理 `event.isTrusted === true` 的事件。
-- 作品編號優先從按鈕的 `href` 或 data 屬性用 §3.2.2 的規則取出；取不到再用頁面網址；都取不到就放棄，不掃頁面文字。
+- 作品編號：列表頁的 `a.btn_cart` 從 `href` 取（只接受加入購物車的路徑 `/<分站>/cart/=/product_id/<ID>.html`）；作品頁本身的 `button.btn_cart[data-ga4-ref="cart_add"]` 沒有 `href`，用文件載入時的頁面網址；都取不到就放棄，不掃頁面文字。不從 `<button>` 讀 `href`，也不單獨比對 `[data-ga4-ref]`。
+- 從點擊目標往上最多找 3 層，而且按鈕裡的子孫元素不能超過 5 個：頁面把 `<html>` 改成購物車按鈕、或把整頁包進購物車連結時，點擊其他地方不會被當成加入購物車（v0.11，M2 審查重現了「任何一次點擊都變成加入頁面指定的作品」）。
 - 點擊就當作「想買」並加入追蹤（`source: 'cart'`），不等待加入成功。漏掉的由 F2 在你打開購物車頁面時補上。從購物車移除作品不會自動取消追蹤。
+- 你在擴充功能裡移除的作品記在 `untracked`（§5.3）：F2 不會把它加回來；你再按一次加入購物車或手動加入時才清掉這筆紀錄。
+- F2 等購物車清單元素（`ul.cart_list`）出現才讀，最多等 10 秒；一直沒出現（頁面還沒渲染完或選擇器失效）就不送，不覆蓋 `lastCart`。預渲染中的頁面等真的顯示後才送。
 - F1／F2 自動加入的作品在追蹤清單標示「自動加入」，提供一鍵移除（頁面腳本可以在你點擊前改寫按鈕，讓清單多出你沒看過的作品）。
 - 儀表板說明：在其他裝置或 App 加入購物車的作品，要打開一次網頁版購物車才會同步。
 
@@ -279,6 +282,7 @@ GET https://dlwatcher.com/product/{作品編號}.json
 | `dlwatcherLastRequest` | `storage.local` | `[id, at][]`（§3.1） | 否 |
 | `dailyAutoAdd` | `storage.local` | `{ date: string; count: number; skipped: number }`（§3.2.4 每日上限；`date` 是 JST 日期，`skipped` 是今天因為上限沒有加入的件數，popup 提示用） | 否 |
 | `lastCart` | `storage.local` | `{ ids: string[]; at: string }`（最近一次 `cartSnapshot`，F15「從購物車選擇」用） | 否 |
+| `untracked` | `storage.local` | `[id, at][]`（你在擴充功能裡移除的作品，F2 不加回來；最多 1,000 筆、保留 180 天） | 否 |
 | `lastManualSyncAt` | `storage.local` | `string`（§3.2.4 `syncCouponsNow` 冷卻） | 否 |
 | `recheckAt` | `storage.local` | `[id, at][]`（§3.2.4 `recheck` 冷卻） | 否 |
 | `seenDocuments` | `storage.session` | `{ badge, cart, track }`，各是 `[documentId, at][]`（§3.2.4） | 否 |
@@ -634,7 +638,7 @@ DL_Assistant/
 ├─ scripts/check-manifest.ts    # 發佈前檢查 manifest 與打包結果（§7.2）
 ├─ scripts/manifest-policy.ts   # manifest 的固定值（權限、CSP、content script），wxt.config.ts 與 check-manifest 共用
 ├─ scripts/content-modules-plugin.ts  # 建置時列出 content script 的模組（§3.2.5）
-├─ scripts/content-modules.baseline.json  # content script 可以打包的套件清單（§3.2.5）
+├─ scripts/content-modules.baseline.json  # content script 可以打包的套件與專案檔案（§3.2.5）
 ├─ src/
 │  ├─ entrypoints/
 │  │  ├─ background.ts          # 排程、查價佇列、通知、唯一的 storage 寫入者
@@ -690,7 +694,7 @@ DL_Assistant/
 | 階段 | 內容 | 完成標準 |
 |---|---|---|
 | M1 骨架（✅ 2026-11-23，v0.9 依審查修正；Chrome 120 實測待補，見 §10.3） | WXT 專案、`zod-setup.ts`、ESLint 規則與 `tests/lint-fixtures/`、`apiGet` 與白名單、`nav.ts` 與連結元件、`Settings` 與 storage 存取層、background 呼叫商品 API 查價、手動加入追蹤（`track` 訊息） | 在 popup 手動加一個作品，看得到現價；`assertAllowed` 行為測試、lint 自我測試、`isWorkId`／`buildWorkUrl`／`intIn`／商品 API 的 `"__proto__"` key 測試通過；manifest 檢查腳本通過；CSP 與 `minimum_chrome_version` 被 Chrome 接受；`setAccessLevel` 生效（content script 呼叫 `chrome.storage.local.get` 會失敗）；§3.4 自我測試表的每個範例都以指定的規則報錯 |
-| M2 自動追蹤（✅ 2026-11-23） | content script（原生 DOM、import 白名單）偵測加入購物車、購物車 DOM 同步、訊息白名單與來源檢查 | 在 DLsite 加入購物車後，追蹤清單自動多一筆；非 `isTrusted` 的點擊不會加入；content script 打包檔不含 `react`、`storage.local`；content script 的 DOM lint 範例都報錯；content script 的 `track` 計入每日上限；訊息來源的拒絕案例與 `setSettings` 多餘欄位被拒絕的測試通過 |
+| M2 自動追蹤（✅ 2026-11-23，v0.11 依審查修正；以照實測結構寫的假頁面驗證，真實 DLsite 與登入狀態的端到端未測） | content script（原生 DOM、import 白名單）偵測加入購物車、購物車 DOM 同步、訊息白名單與來源檢查 | 在 DLsite 加入購物車後，追蹤清單自動多一筆；非 `isTrusted` 的點擊不會加入；content script 打包檔不含 `react`、`storage.local`；content script 的 DOM lint 範例都報錯；content script 的 `track` 計入每日上限；訊息來源的拒絕案例與 `setSettings` 多餘欄位被拒絕的測試通過 |
 | M3 史低 | DLWatcher 串接、歷史資料存 IndexedDB、自己的 `priceLog`、合理性檢查、查價佇列與退避 | 每個追蹤作品都有史低和期間；在設定關閉 DLWatcher 後，史低與走勢改用自己的紀錄；查價途中 service worker 被終止，重啟後能接著做；「可買 → 查不到 ×3 → 可買（同價）」得到 3 筆紀錄；「關瀏覽器 3 天、前後同價」得到 2 筆紀錄，中間畫虛線；DLWatcher 合理性檢查的 4 個不通過案例（`lowest` 過高、過低、`start > end`、走勢點超出 0～1）都保留舊資料 |
 | M4 通知 | alarms 排程、§6.1 的處理步驟、去重、一批一次寫入 | 作品打折時收到一次通知；回到原價後再次打折會再通知；§6.1 列出的所有測試情境通過（含查不到一次不重發、一批多件合併成一則、暫停恢復） |
 | M5 儀表板 | 表格、走勢圖、等待建議、最近的通知 | 一頁看完所有追蹤作品的價格狀況；`dashboard.html?n=` 帶不存在的 ID 時不篩選、不報錯 |

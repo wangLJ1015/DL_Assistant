@@ -46,7 +46,10 @@ export default defineBackground(() => {
     const c = classifyMessage(raw, sender, browser.runtime.id, browser.runtime.getURL('/'));
     if (c.from === 'rejected') return false;
     const job = c.from === 'ext' ? handleExt(c.msg) : handleContentMessage(c.msg, sender);
-    job.then(sendResponse, () => sendResponse({ ok: false, reason: 'failed' }));
+    job.then(sendResponse, (e: unknown) => {
+      console.error('[DL_Assistant] 訊息處理失敗', e);
+      sendResponse({ ok: false, reason: 'failed' });
+    });
     // §3.2.4：非同步回覆一律 return true ＋ sendResponse()。
     return true;
   });

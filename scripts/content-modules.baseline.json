@@ -1,4 +1,5 @@
 {
-  "$comment": "§3.2.5：content script 可以打包進去的套件。check-manifest 發現清單外的套件就失敗；確認安全後才加進來（改規格）。",
-  "packages": ["@wxt-dev/browser", "wxt", "zod"]
+  "$comment": "§3.2.5：content script 可以打包進去的套件與專案檔案。check-manifest 發現清單外的就失敗；確認安全後才加進來（改規格）。files 是比對專案內模組路徑的 regex。",
+  "packages": ["wxt", "zod"],
+  "files": "^(src/entrypoints/dlsite-content\\.ts|src/content/[a-z-]+\\.ts|src/lib/(ids|text|selectors|messages|zod-setup|api/endpoints|coupons/parse|dates|schema|badge-style)\\.ts|virtual:wxt-[a-z-]+)$"
 }

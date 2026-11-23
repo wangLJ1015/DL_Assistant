@@ -4,14 +4,23 @@
 import { isWorkId } from './ids';
 
 /**
- * 加入購物車按鈕。
+ * 加入購物車按鈕（2026-11-23 實測）。
  * - 列表頁（排行榜、搜尋結果、作品頁的推薦區）：`a.btn_cart`，href 是 `/<分站>/cart/=/product_id/<ID>.html`。
- * - 作品頁本身：`button.btn_cart[data-ga4-ref="cart_add"]`，沒有 href（送 POST /api/cart/<分站>/add），編號從頁面網址取。
+ *   編號只從這種 <a> 的 href 讀。
+ * - 作品頁本身：`button.btn_cart[data-ga4-ref="cart_add"]`，沒有 href（送 POST /api/cart/<分站>/add），
+ *   編號用文件載入時的頁面網址。不讀 <button> 的 href。
+ * 不寫成單獨的 [data-ga4-ref="cart_add"]：頁面能把這個屬性加到 <html> 上，讓每一次點擊都比對成功（M2 審查重現）。
  */
-export const CART_BUTTON_SELECTOR = 'a.btn_cart, button.btn_cart, [data-ga4-ref="cart_add"]';
+export const LINK_CART_BUTTON_SELECTOR = 'a.btn_cart[href]';
+export const PAGE_CART_BUTTON_SELECTOR = 'button.btn_cart[data-ga4-ref="cart_add"]';
 
-/** 作品頁本身的加入購物車按鈕（沒有 href，編號只能從頁面網址取）。 */
-export const PAGE_CART_BUTTON_SELECTOR = '[data-ga4-ref="cart_add"]';
+/** 從點擊目標往上最多找幾層（按鈕本身或按鈕裡的文字、圖示）。 */
+export const CART_BUTTON_MAX_DEPTH = 3;
+/** 按鈕裡最多幾個子孫元素（實際的按鈕只有文字或一兩個圖示；包住整頁的元素一定超過）。 */
+export const CART_BUTTON_MAX_DESCENDANTS = 5;
+
+/** 購物車頁的作品清單本身（空的購物車也有這個元素；找不到代表頁面還沒渲染或選擇器失效）。 */
+export const CART_LIST_SELECTOR = 'ul.cart_list';
 
 /** 購物車頁的作品（推薦區也有 data-product_id，所以限定在 ul.cart_list 底下）。 */
 export const CART_ITEM_SELECTOR = 'ul.cart_list > li.cart_list_item';

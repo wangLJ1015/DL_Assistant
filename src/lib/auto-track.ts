@@ -4,7 +4,7 @@ import { browser } from 'wxt/browser';
 import { z } from 'zod';
 import { isoToMs, jstDate, msToIso, nowIso } from './dates';
 import { CART_SNAPSHOT_MAX_NEW, DAILY_AUTO_ADD_LIMIT, isoSchema, MAX_TRACKED_ITEMS } from './models';
-import { readDailyAutoAdd, readItems, SESSION_KEYS, writeQueue, writeStore } from './storage';
+import { readDailyAutoAdd, readItems, readUntracked, SESSION_KEYS, writeQueue, writeStore } from './storage';
 import { newTrackedItem, refreshPrices } from './tracking';
 
 // ---- 同一個 documentId 只接受一次（storage.session 的 seenDocuments）----
@@ -53,6 +53,8 @@ export interface AutoTrackResult {
   added: string[];
   /** 因為每日上限、一次的新增上限或追蹤清單上限而沒有加入的件數。 */
   skipped: number;
+  /** 一件都沒加入而且有被上限擋下時的原因（§3.2.4「超過上限的訊息回覆 rateLimited」）。 */
+  blockedBy?: 'rateLimited' | 'limit';
 }
 
 export interface AutoTrackOptions {
@@ -60,6 +62,11 @@ export interface AutoTrackOptions {
   maxNew?: number;
   /** 同一次寫入順便記下 lastCart（cartSnapshot）。 */
   lastCartIds?: string[];
+  /**
+   * true（cartSnapshot）：使用者自己移除過的作品（untracked）不加回來。
+   * false（cartClicked、track）：使用者剛按下按鈕，視為重新想要，清掉移除紀錄後加入。
+   */
+  skipUntracked?: boolean;
 }
 
 /**
@@ -70,28 +77,40 @@ export async function autoTrack(ids: readonly string[], source: 'cart' | 'page',
   const maxNew = opts.maxNew ?? Number.POSITIVE_INFINITY;
   const result = await writeQueue(async (): Promise<AutoTrackResult> => {
     const now = nowIso();
-    const [items, daily] = await Promise.all([readItems(), readDailyAutoAdd(jstDate(now))]);
+    const [items, daily, untracked] = await Promise.all([readItems(), readDailyAutoAdd(jstDate(now)), readUntracked()]);
     const added: string[] = [];
     let skipped = 0;
+    let blockedBy: AutoTrackResult['blockedBy'];
+    let untrackedChanged = false;
     for (const id of new Set(ids)) {
       if (items.has(id)) continue;
-      if (added.length >= maxNew || daily.count >= DAILY_AUTO_ADD_LIMIT || items.size >= MAX_TRACKED_ITEMS) {
+      if (opts.skipUntracked && untracked.has(id)) continue;
+      if (items.size >= MAX_TRACKED_ITEMS) {
         skipped++;
+        blockedBy ??= 'limit';
+        continue;
+      }
+      if (added.length >= maxNew || daily.count >= DAILY_AUTO_ADD_LIMIT) {
+        skipped++;
+        blockedBy ??= 'rateLimited';
         continue;
       }
       items.set(id, newTrackedItem(id, source));
       added.push(id);
       daily.count++;
+      untrackedChanged = untracked.delete(id) || untrackedChanged;
     }
     daily.skipped = Math.min(daily.skipped + skipped, 100_000);
     await writeStore({
       ...(added.length > 0 ? { items } : {}),
       ...(added.length > 0 || skipped > 0 ? { dailyAutoAdd: daily } : {}),
+      ...(untrackedChanged ? { untracked } : {}),
       ...(opts.lastCartIds ? { lastCart: { ids: [...opts.lastCartIds], at: now } } : {}),
     });
-    return { added, skipped };
+    return { added, skipped, ...(added.length === 0 && blockedBy ? { blockedBy } : {}) };
   });
-  if (result.added.length > 0) void refreshPrices(result.added).catch(() => undefined);
+  if (result.added.length > 0)
+    void refreshPrices(result.added).catch((e: unknown) => console.warn('[DL_Assistant] 自動加入後的查價失敗', e));
   return result;
 }
 
