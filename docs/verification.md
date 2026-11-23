@@ -27,13 +27,13 @@
 
 | 項目 | 要確認的事 | 時機 |
 |---|---|---|
-| ~~收緊的 CSP~~ | ✅ M1（Chrome 157）：manifest 被接受；`<form>` 送出、外部 CSS、`img.dlsite.jp` 以外的圖片、對 `/home/mypage/coupon` 的 fetch 都被擋（請求沒有送出）；service worker 對白名單外路徑的 fetch 也被擋。`pnpm verify:chrome` 重跑 | M1 |
+| ~~收緊的 CSP~~ | ✅ M1（Chrome 157）：manifest 被接受；`<form>` 送出、外部 CSS、`img.dlsite.jp` 以外的圖片、對 `/home/mypage/coupon` 的 fetch 都被擋（請求沒有送出）；service worker 對白名單外路徑的 fetch 也被擋；`img.dlsite.jp` 的作品圖片可以載入（v0.9 補上正向檢查）。`pnpm verify:chrome` 重跑 | M1 |
 | ~~`minimum_chrome_version`~~ | ✅ M1：manifest 被接受 | M1 |
-| `storage.local` 存取層級 | ✅ M1（Chrome 157）：設定後 content script 的 `chrome.storage.local.get` 失敗（「Access to storage is not allowed from this context.」），`storage.session` 也一樣。未確認：Chrome 120 本身（實測用 157）、重開瀏覽器後是否保留（每次啟動都會重設，結果不影響安全性） | M1 |
+| `storage.local` 存取層級 | ✅ M1（Chrome 157）：設定後 content script 的 `chrome.storage.local.get` 失敗（「Access to storage is not allowed from this context.」），`storage.session` 也一樣。background 記在 `storageLock` 的結果是成功。**未確認**：Chrome 120 本身（實測用 157；MDN 寫這個方法只支援 `storage.session`，必須實測）、重開瀏覽器後存取層級是否保留。v0.8 寫「每次啟動都會重設，結果不影響安全性」不成立：當時沒有 `onStartup`，瀏覽器重開後到 service worker 第一次被喚醒之前沒有人重設。v0.9 加上 `onStartup`，並在失敗時記錄、popup 顯示警告 | M1 |
 | ~~開發模式 CSP~~ | ✅ M1：**會擋**。開發模式下 `connect-src` 擋住 HMR 的 `ws://localhost:3000`，`style-src 'self'` 擋住 Vite 注入的 `<style>`（樣式完全沒套用）。改成只在開發伺服器放寬（§7.1 `DEV_MANIFEST_CSP`），放寬後沒有違規；`check-manifest` 確認發佈版沒有 `'unsafe-inline'` | M1 |
 | ~~`meta refresh`~~ | ✅ M1：以程式插入擴充功能頁面的 `<meta http-equiv=refresh>` **會導覽**（CSP 擋不住），lint 規則必須保留 | M1 |
 | ~~`externally_connectable`~~ | ✅ M1：manifest 被接受 | M1 |
-| ~~zod 4~~ | ✅ M1：popup 與 background 跑完整的解析流程，沒有任何 CSP 違規或例外 | M1 |
+| ~~zod 4~~ | ✅ M1：popup 與 background 跑完整的解析流程，沒有任何 CSP 違規或例外。v0.9：`verify:chrome` 改成只排除刻意觸發違規的區段（以發生先後判斷，不比對訊息內容）；改了之後抓到測試自己的 `*.css` 攔截規則擋掉了 popup 本身的樣式表，已修正 | M1 |
 | ~~fetch 與 User-Agent~~ | ✅ M1：在擴充功能頁面 fetch 時指定 `User-Agent`，實際送出的仍是瀏覽器的 UA（無法覆寫） | M1 |
 | ~~pnpm~~ | ✅ M1：固定 `pnpm@12.21.0`。`minimumReleaseAge`、`trustPolicy: no-downgrade`、`strictDepBuilds`、`allowBuilds` 都生效（`trustPolicy` 擋下了 puppeteer → `chromium-bidi` 的信任降級，因此不使用 puppeteer） | M1 |
 | content script 模組清單 | Vite plugin 的 `generateBundle` 在 WXT 的 content script 建置中能否取得 chunk 的 `modules`（§3.2.5） | M2 |

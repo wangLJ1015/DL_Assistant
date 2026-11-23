@@ -74,6 +74,22 @@ describe('lint fixtures', () => {
       'tests/lint-fixtures/content/click.ts',
       'tests/lint-fixtures/content/create-element-img.ts',
       'tests/lint-fixtures/content/storage-local-get.ts',
+      // v0.9（M1 審查）
+      'tests/lint-fixtures/ts/browser-import-alias.ts',
+      'tests/lint-fixtures/ts/chrome-computed-tabs.ts',
+      'tests/lint-fixtures/ts/window-computed-open.ts',
+      'tests/lint-fixtures/ts/as-brand-qualified.ts',
+      'tests/lint-fixtures/ts/brand-type-alias.ts',
+      'tests/lint-fixtures/ts/z-coerce-import.ts',
+      'tests/lint-fixtures/content/style-property.ts',
+      'tests/lint-fixtures/content/set-attribute-ns-style.ts',
+      'tests/lint-fixtures/content/set-attribute-node.ts',
+      'tests/lint-fixtures/content/style-text-url.ts',
+      'tests/lint-fixtures/content/constructed-stylesheet.ts',
+      'tests/lint-fixtures/content/onmessage-property.ts',
+      'tests/lint-fixtures/content/chrome-alias-storage.ts',
+      'tests/lint-fixtures/content/chrome-computed-storage.ts',
+      'tests/lint-fixtures/content/import-sibling-entry.ts',
     ];
     for (const r of required) expect(covered.has(r), r).toBe(true);
   });

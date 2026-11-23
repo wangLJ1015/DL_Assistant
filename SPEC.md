@@ -1,6 +1,6 @@
 # DL_Assistant 專案規格書
 
-> 版本：v0.8（草案，M1 實作後更新）　日期：2026-11-23
+> 版本：v0.9（草案，M1 審查後更新）　日期：2026-11-23
 > 一句話說明：Chrome 擴充功能。把 DLsite 加入購物車的作品自動列入追蹤，定時查價、顯示史低與價格走勢，出現優惠時跳出通知；也能隨時查任一作品的史低，並依你手上的優惠券算出最划算的買法。
 >
 > 變更紀錄見 [CHANGELOG.md](CHANGELOG.md)。規格分成四個檔案，章節編號跨檔案沿用：
@@ -197,7 +197,7 @@ MV3 service worker 閒置 30 秒會被終止，記憶體裡的狀態會消失。
 - 右鍵選單在 `runtime.onInstalled` 先 `chrome.contextMenus.removeAll()` 再 `create`，不在 service worker 每次啟動時建立（重複的 `id` 會出錯）。
 
 ### 4.2 資料寫入
-- **content script 不能碰儲存資料**：`chrome.storage.local` 預設對 content script 開放（只有 `storage.session` 預設不開放）。background 在最上層（每次 service worker 啟動）與 `runtime.onInstalled` 都呼叫 `chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' })`，讓 content script（以及打包進去的套件、被攻破的分頁程序）無法直接讀寫券、追蹤清單與設定，繞過訊息驗證。M1 確認在 Chrome 120 對 `storage.local` 有效（§10.3）；若不支援，把 `minimum_chrome_version` 提高到支援的版本，或把 `coupons`、`items`、`settings` 改存擴充功能來源的 IndexedDB。
+- **content script 不能碰儲存資料**：`chrome.storage.local` 預設對 content script 開放（只有 `storage.session` 預設不開放）。background 在最上層（每次 service worker 啟動）、`runtime.onInstalled` 與 `runtime.onStartup`（瀏覽器啟動時就喚醒 service worker，不必等到第一則訊息）都呼叫 `chrome.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' })`，讓 content script（以及打包進去的套件、被攻破的分頁程序）無法直接讀寫券、追蹤清單與設定，繞過訊息驗證。呼叫失敗時不丟例外：結果記在 `storage.session` 的 `storageLock`、輸出 `console.error`，popup 顯示「這個 Chrome 版本無法限制網頁程式讀取擴充功能的資料」。要在 Chrome 120 確認對 `storage.local` 有效（§10.3；MDN 寫這個方法只支援 `storage.session`，Chrome 文件則列在 `storage.local` 底下）；若不支援，把 `minimum_chrome_version` 提高到支援的版本，或把 `coupons`、`items`、`settings` 改存擴充功能來源的 IndexedDB。
 - 所有寫入都經過 background（單一寫入者）。其他頁面與 content script 用訊息要求修改。background 內部用一個 Promise 佇列讓寫入依序執行，避免「讀 → 改 → 寫」互相覆蓋。
 - background 從 storage 讀回的資料一律再跑 zod 驗證後放進 `Map`（§3.2.3）。
 - 擴充功能頁面讀取資料時直接讀 `chrome.storage.local` 與 IndexedDB，並用 `chrome.storage.onChanged` 更新畫面。content script 讀不到 IndexedDB 的擴充功能資料，徽章需要的資料由 background 回覆 `badgeInfo`。
@@ -286,6 +286,7 @@ GET https://dlwatcher.com/product/{作品編號}.json
 | `lookupCache` | `storage.session` | §3.5 | 否 |
 | `couponSyncLock` | `storage.session` | `{ token, tabId, documentId, expiresAt }`（§5.4） | 否 |
 | `pendingManual` | `storage.session` | `{ tabId, expiresAt }`（F14） | 否 |
+| `storageLock` | `storage.session` | `{ ok: boolean; at: string }`（§4.2 `setAccessLevel` 的結果） | 否 |
 | `history` | IndexedDB | `HistoryRecord` | 否 |
 | `priceLog` | IndexedDB | `PriceLogEntry` | 是 |
 
@@ -316,6 +317,7 @@ interface TrackedItem {
   baselineAt?: string;     // 建立基準的時間；為空時查價只建立基準、不發通知（§6.1）
   targetPrice?: number;    // 使用者設定的目標價（日圓）
   paused: boolean;         // 暫停 = 不查價、不通知；恢復時清掉 baselineAt，下一次查價重新建立基準
+  notFoundCount?: number;  // 連續查不到（API 沒回傳、is_sold_out）的次數，1～999；查得到就省略。資料驗證失敗不算查不到（§3.2.3）
 }
 
 // 最新狀態（key: "snapshots"，以 id 為 key；載入後放進 Map）
@@ -364,7 +366,8 @@ interface HistoryRecord {
 //      → 代表中間有一段沒查價；畫圖時「上一筆 lastSeenAt 到這一筆 at」畫虛線
 // 因此連續查不到只更新同一筆的 lastSeenAt；恢復販售時 status 改變，一定新增一筆。
 // 第一次查價就查不到（例如手動輸入了不存在的編號）時沒有可沿用的資料：不寫 PriceSnapshot 與 priceLog，
-// 追蹤清單顯示「查不到這個作品」；連續 3 次查不到時提示移除。
+// 追蹤清單顯示「查不到這個作品」；連續 3 次查不到（TrackedItem.notFoundCount ≥ 3）時提示移除。
+// 查價請求本身失敗（網路、HTTP 錯誤）時什麼都不寫；還沒有快照的作品顯示「還沒有價格」與「重新查價」。
 interface PriceLogEntry {
   id: string;
   price: number;
@@ -679,7 +682,7 @@ DL_Assistant/
 
 | 階段 | 內容 | 完成標準 |
 |---|---|---|
-| M1 骨架（✅ 2026-11-23） | WXT 專案、`zod-setup.ts`、ESLint 規則與 `tests/lint-fixtures/`、`apiGet` 與白名單、`nav.ts` 與連結元件、`Settings` 與 storage 存取層、background 呼叫商品 API 查價、手動加入追蹤（`track` 訊息） | 在 popup 手動加一個作品，看得到現價；`assertAllowed` 行為測試、lint 自我測試、`isWorkId`／`buildWorkUrl`／`intIn`／商品 API 的 `"__proto__"` key 測試通過；manifest 檢查腳本通過；CSP 與 `minimum_chrome_version` 被 Chrome 接受；`setAccessLevel` 生效（content script 呼叫 `chrome.storage.local.get` 會失敗）；§3.4 自我測試表的每個範例都以指定的規則報錯 |
+| M1 骨架（✅ 2026-11-23，v0.9 依審查修正；Chrome 120 實測待補，見 §10.3） | WXT 專案、`zod-setup.ts`、ESLint 規則與 `tests/lint-fixtures/`、`apiGet` 與白名單、`nav.ts` 與連結元件、`Settings` 與 storage 存取層、background 呼叫商品 API 查價、手動加入追蹤（`track` 訊息） | 在 popup 手動加一個作品，看得到現價；`assertAllowed` 行為測試、lint 自我測試、`isWorkId`／`buildWorkUrl`／`intIn`／商品 API 的 `"__proto__"` key 測試通過；manifest 檢查腳本通過；CSP 與 `minimum_chrome_version` 被 Chrome 接受；`setAccessLevel` 生效（content script 呼叫 `chrome.storage.local.get` 會失敗）；§3.4 自我測試表的每個範例都以指定的規則報錯 |
 | M2 自動追蹤 | content script（原生 DOM、import 白名單）偵測加入購物車、購物車 DOM 同步、訊息白名單與來源檢查 | 在 DLsite 加入購物車後，追蹤清單自動多一筆；非 `isTrusted` 的點擊不會加入；content script 打包檔不含 `react`、`storage.local`；content script 的 DOM lint 範例都報錯；content script 的 `track` 計入每日上限；訊息來源的拒絕案例與 `setSettings` 多餘欄位被拒絕的測試通過 |
 | M3 史低 | DLWatcher 串接、歷史資料存 IndexedDB、自己的 `priceLog`、合理性檢查、查價佇列與退避 | 每個追蹤作品都有史低和期間；在設定關閉 DLWatcher 後，史低與走勢改用自己的紀錄；查價途中 service worker 被終止，重啟後能接著做；「可買 → 查不到 ×3 → 可買（同價）」得到 3 筆紀錄；「關瀏覽器 3 天、前後同價」得到 2 筆紀錄，中間畫虛線；DLWatcher 合理性檢查的 4 個不通過案例（`lowest` 過高、過低、`start > end`、走勢點超出 0～1）都保留舊資料 |
 | M4 通知 | alarms 排程、§6.1 的處理步驟、去重、一批一次寫入 | 作品打折時收到一次通知；回到原價後再次打折會再通知；§6.1 列出的所有測試情境通過（含查不到一次不重發、一批多件合併成一則、暫停恢復） |

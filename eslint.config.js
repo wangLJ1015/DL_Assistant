@@ -47,12 +47,36 @@ const NAV_SYNTAX = [
     `CallExpression[callee.property.name='createElement'][arguments.0.value=/^(a|form|area|meta|link|base|iframe)$/i]`,
     '§3.4：禁止以程式建立會導覽的元素',
   ),
+  sel(`MemberExpression[computed=true][object.name=/^(window|globalThis|self|top|parent)$/]`, '§3.4：禁止以 window[...] 取用全域 API'),
+];
+
+/**
+ * §3.4、§3.2.4、§3.2.5：上面的規則靠名稱比對，所以 chrome／browser 不能改名、不能用 [...] 取屬性。
+ * 全部檔案都適用（nav.ts 也一樣）。
+ */
+const ALIAS_SYNTAX = [
+  sel(`ImportSpecifier[imported.name=${CHROME}]:not([local.name=${CHROME}])`, '§3.4：browser 不能改名 import（規則靠名稱比對）'),
+  sel(`ImportDeclaration[source.value='wxt/browser'] > ImportNamespaceSpecifier`, '§3.4：wxt/browser 請用 import { browser }'),
+  sel(`VariableDeclarator[init.name=${CHROME}]`, '§3.4：禁止把 chrome／browser 指派給變數或解構'),
+  sel(`AssignmentExpression[right.name=${CHROME}]`, '§3.4：禁止把 chrome／browser 指派給變數'),
+  sel(`MemberExpression[computed=true][object.name=${CHROME}]`, '§3.4：chrome／browser 的 API 不能用 [...] 取用'),
+  sel(`MemberExpression[computed=true][object.object.name=${CHROME}]`, '§3.4：chrome／browser 的 API 不能用 [...] 取用'),
+  sel(`MemberExpression[computed=true][object.object.object.name=${CHROME}]`, '§3.4：chrome／browser 的 API 不能用 [...] 取用'),
+  sel(
+    `MemberExpression[object.name=/^(window|globalThis|self|top|parent)$/][property.name=${CHROME}]`,
+    '§3.4：請直接用 browser，不要經過 window／globalThis',
+  ),
 ];
 
 /** §3.4 第 3 層：品牌型別不能用斷言產生。只有 nav.ts 與 ids.ts（buildWorkUrl）例外。 */
+const BRAND = '/^(DlsiteNavUrl|ExtPageUrl)$/';
 const BRAND_SYNTAX = [
-  sel(`TSAsExpression[typeAnnotation.typeName.name=/^(DlsiteNavUrl|ExtPageUrl)$/]`, '§3.4：禁止 as DlsiteNavUrl／ExtPageUrl'),
-  sel(`TSTypeAssertion[typeAnnotation.typeName.name=/^(DlsiteNavUrl|ExtPageUrl)$/]`, '§3.4：禁止 <DlsiteNavUrl> 型別斷言'),
+  // 型別斷言的型別裡任何位置出現品牌型別都算（含 N.DlsiteNavUrl、import('./nav').DlsiteNavUrl、聯集）。
+  sel(`TSAsExpression > .typeAnnotation Identifier[name=${BRAND}]`, '§3.4：禁止 as DlsiteNavUrl／ExtPageUrl'),
+  sel(`TSTypeAssertion > .typeAnnotation Identifier[name=${BRAND}]`, '§3.4：禁止 <DlsiteNavUrl> 型別斷言'),
+  // 換個名字就能繞過上面的比對，所以品牌型別不能改名 import、不能另取別名。
+  sel(`ImportSpecifier[imported.name=${BRAND}]:not([local.name=${BRAND}])`, '§3.4：品牌型別不能改名 import'),
+  sel(`TSTypeAliasDeclaration Identifier[name=${BRAND}]`, '§3.4：品牌型別不能另取別名'),
 ];
 
 /** §5.5：只有 src/lib/dates.ts 可以用單一參數的 new Date(x)。 */
@@ -61,8 +85,16 @@ const DATE_SYNTAX = [sel(`NewExpression[callee.name='Date'][arguments.length=1]`
 /** 全部檔案都適用。 */
 const COMMON_SYNTAX = [
   sel(`MemberExpression[property.name=/^on(Message|Connect)External$/]`, '§3.2.4：禁止 onMessageExternal／onConnectExternal'),
-  sel(`MemberExpression[object.name='z'][property.name='coerce']`, '§3.2.3：禁止 z.coerce'),
+  sel(`Literal[value=/^on(Message|Connect)External$/]`, '§3.2.4：禁止 onMessageExternal／onConnectExternal'),
+  sel(`MemberExpression[property.name='coerce']`, '§3.2.3：禁止 z.coerce'),
+  sel(`Literal[value='coerce']`, '§3.2.3：禁止 z.coerce'),
+  sel(`ImportSpecifier[imported.name='coerce']`, '§3.2.3：禁止 z.coerce'),
+  ...ALIAS_SYNTAX,
 ];
+
+const RISKY_ATTR = '/^(src|href|srcset|poster|data|action|formaction|ping|xlink:href|style|on.*)$/i';
+const RISKY_PROP = '/^(src|href|srcset|action|cssText|innerHTML|outerHTML|style|adoptedStyleSheets)$/';
+const CSS_FETCH = String.raw`/url\s*\(|@import|image-set\s*\(/i`;
 
 /** §3.2.4、§3.2.5：content script 專用。 */
 const CONTENT_SYNTAX = [
@@ -75,22 +107,43 @@ const CONTENT_SYNTAX = [
     '§3.2.5：content script 的 SVG 只能用 svg、path、circle、rect、g',
   ),
   sel(
-    `CallExpression[callee.property.name=/^setAttribute(NS)?$/]:not([arguments.0.type='Literal'])`,
+    `CallExpression[callee.property.name='setAttribute']:not([arguments.0.type='Literal'])`,
     '§3.2.5：setAttribute 的屬性名稱必須是字面值',
   ),
+  sel(`CallExpression[callee.property.name='setAttribute'][arguments.0.value=${RISKY_ATTR}]`, '§3.2.5：禁止設定會載入資源或執行程式的屬性'),
+  // setAttributeNS 的屬性名稱是第 2 個參數
   sel(
-    `CallExpression[callee.property.name=/^setAttribute(NS)?$/][arguments.0.value=/^(src|href|srcset|poster|data|action|formaction|ping|xlink:href|style|on.*)$/i]`,
+    `CallExpression[callee.property.name='setAttributeNS']:not([arguments.1.type='Literal'])`,
+    '§3.2.5：setAttributeNS 的屬性名稱必須是字面值',
+  ),
+  sel(
+    `CallExpression[callee.property.name='setAttributeNS'][arguments.1.value=${RISKY_ATTR}]`,
     '§3.2.5：禁止設定會載入資源或執行程式的屬性',
   ),
   sel(
-    `AssignmentExpression[left.property.name=/^(src|href|srcset|action|cssText|innerHTML|outerHTML)$/]`,
-    '§3.2.5：禁止指派 src、href、cssText、innerHTML 等屬性',
+    `CallExpression[callee.property.name=/^(setAttributeNode(NS)?|createAttribute(NS)?|insertRule)$/]`,
+    '§3.2.5：禁止 setAttributeNode／createAttribute／insertRule',
   ),
+  sel(`AssignmentExpression[left.property.name=${RISKY_PROP}]`, '§3.2.5：禁止指派 src、href、style、cssText、innerHTML 等屬性'),
   sel(
-    `AssignmentExpression[left.computed=true][left.property.value=/^(src|href|srcset|action|cssText|innerHTML|outerHTML)$/]`,
-    '§3.2.5：禁止指派 src、href、cssText、innerHTML 等屬性',
+    `AssignmentExpression[left.computed=true][left.property.value=${RISKY_PROP}]`,
+    '§3.2.5：禁止指派 src、href、style、cssText、innerHTML 等屬性',
   ),
+  // el.style.backgroundImage = 'url(...)' 也會以 DLsite 的身分發出請求；樣式一律寫在 badge-style.ts
+  sel(`AssignmentExpression > MemberExpression.left[object.property.name='style']`, '§3.2.5：禁止直接改 element.style'),
   sel(`CallExpression[callee.property.name='setProperty']`, '§3.2.5：禁止 style.setProperty'),
+  sel(`NewExpression[callee.name='CSSStyleSheet']`, '§3.2.5：禁止 new CSSStyleSheet'),
+  sel(`Literal[value=${CSS_FETCH}]`, '§3.2.5：content script 的字串不能含 url(、@import、image-set('),
+  sel(`TemplateElement[value.raw=${CSS_FETCH}]`, '§3.2.5：content script 的字串不能含 url(、@import、image-set('),
+  // 事件處理屬性（onmessage、onclick…）一律不用；監聽只用 addEventListener
+  sel(`AssignmentExpression[left.type='Identifier'][left.name=/^on[a-z]+$/]`, '§3.2.4：content script 不設定 on* 事件處理屬性'),
+  sel(`AssignmentExpression[left.property.name=/^on[a-z]+$/]`, '§3.2.4：content script 不設定 on* 事件處理屬性'),
+  // 用字串當屬性名稱會讓上面的名稱比對失效
+  sel(
+    `MemberExpression[computed=true][property.type='Literal'][property.raw=/^['"]/]`,
+    '§3.2.5：content script 不用字串取屬性（obj["x"]）',
+  ),
+  sel(`MemberExpression[computed=true][property.type='TemplateLiteral']`, '§3.2.5：content script 不用字串取屬性（obj[`x`]）'),
   sel(`CallExpression[callee.property.name=/^(click|submit|requestSubmit|dispatchEvent|focus)$/]`, '§3.2.5：content script 不操作頁面元素'),
   sel(`MemberExpression[object.name=${CHROME}][property.name='storage']`, '§3.2.5：content script 禁止使用 storage'),
   sel(`CallExpression[callee.property.name='addEventListener'][arguments.0.value='message']`, '§3.2.4：content script 不監聽 message 事件'),
@@ -132,9 +185,14 @@ const JSX_RUNTIME_PATHS = [
 ];
 /** §3.2.5 content script 可以 import 的模組（白名單以外一律禁止）。 */
 const CONTENT_ALLOWED = 'ids|text|selectors|messages|zod-setup|api/endpoints|coupons/parse|dates|schema|badge-style';
-const CONTENT_IMPORT_REGEX = `^(?!(?:(?:\\.\\.?/)+lib/|@/lib/)(?:${CONTENT_ALLOWED})$)(?!(?:\\.\\./)+content/[a-z-]+$)(?!\\./[a-z-]+$)(?!zod$)(?!wxt/utils/define-unlisted-script$)`;
+const CONTENT_IMPORT_BASE = `(?!(?:(?:\\.\\.?/)+lib/|@/lib/)(?:${CONTENT_ALLOWED})$)(?!(?:\\.\\./)+content/[a-z-]+$)(?!zod$)(?!wxt/utils/define-unlisted-script$)`;
+/** src/content/ 底下的檔案可以互相 import（./xxx）。 */
+const CONTENT_IMPORT_REGEX = `^${CONTENT_IMPORT_BASE}(?!\\./[a-z-]+$)`;
+/** 入口檔在 src/entrypoints/，./xxx 會指到 background 等其他入口，所以不允許（只能用 ../content/xxx）。 */
+const CONTENT_ENTRY_IMPORT_REGEX = `^${CONTENT_IMPORT_BASE}`;
 
-const CONTENT_FILES = ['src/entrypoints/dlsite-content.ts', 'src/content/**/*.ts'];
+const CONTENT_ENTRY = 'src/entrypoints/dlsite-content.ts';
+const CONTENT_FILES = [CONTENT_ENTRY, 'src/content/**/*.ts'];
 const LINK_COMPONENTS = ['src/components/WorkLink.tsx', 'src/components/NavLink.tsx', 'src/components/ExportButton.tsx'];
 
 export default tseslint.config(
@@ -224,6 +282,18 @@ export default tseslint.config(
         {
           paths: JSX_RUNTIME_PATHS,
           patterns: [{ regex: CONTENT_IMPORT_REGEX, message: '§3.2.5：content script 只能 import 白名單內的模組' }],
+        },
+      ],
+    },
+  },
+  {
+    files: [CONTENT_ENTRY],
+    rules: {
+      'no-restricted-imports': [
+        'error',
+        {
+          paths: JSX_RUNTIME_PATHS,
+          patterns: [{ regex: CONTENT_ENTRY_IMPORT_REGEX, message: '§3.2.5：content script 只能 import 白名單內的模組' }],
         },
       ],
     },

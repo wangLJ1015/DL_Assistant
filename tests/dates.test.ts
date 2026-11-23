@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { z } from 'zod';
-import { isCanonicalIso, parseJst, resolveDiscountEnd, unixSecondsToIso } from '../src/lib/dates';
+import { __regexForTest, isCanonicalIso, parseJst, resolveDiscountEnd, unixSecondsToIso } from '../src/lib/dates';
+import { unixSecondsSchema } from '../src/lib/schema';
 
 // JST 的時間 → UTC ISO（測試用的小工具）
 const jst = (s: string) => parseJst(s)!;
@@ -61,13 +61,31 @@ describe('§5.5 resolveDiscountEnd', () => {
 });
 
 describe('§5.5 limit_date', () => {
-  const limitDate = z.number().int().min(946684800).max(4102444800);
   it('converts seconds to ISO', () => {
-    expect(unixSecondsToIso(limitDate.parse(1796227116))).toBe('2026-12-02T15:58:36.000Z');
+    expect(unixSecondsToIso(unixSecondsSchema.parse(1796227116))).toBe('2026-12-02T15:58:36.000Z');
   });
-  it('rejects milliseconds', () => {
-    expect(limitDate.safeParse(1796227116000).success).toBe(false);
+  it.each([1796227116000, 1796227116.5, 946684799, 4102444801, '1796227116', null])('rejects %j', (v) => {
+    expect(unixSecondsSchema.safeParse(v).success).toBe(false);
   });
+});
+
+describe('§3.2.6 ReDoS', () => {
+  const evil = [
+    '1'.repeat(100_000),
+    '2026-11-28 ' + '1'.repeat(100_000),
+    '11/' + '2'.repeat(100_000) + ' 00:00',
+    '2026-12-02T15:58:36.' + '0'.repeat(100_000) + 'Z',
+    '-/: T.Z'.repeat(15_000),
+  ];
+  for (const [name, re] of Object.entries(__regexForTest)) {
+    it(`${name} finishes within 50ms on 100k-char input`, () => {
+      for (const s of evil) {
+        const t0 = performance.now();
+        re.test(s);
+        expect(performance.now() - t0).toBeLessThan(50);
+      }
+    });
+  }
 });
 
 describe('isCanonicalIso', () => {

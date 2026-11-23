@@ -26,3 +26,6 @@ export function truncateChars(s: string, n: number): string {
 export function summarizeIssues(error: z.ZodError): { path: string; code: string }[] {
   return error.issues.map((i) => ({ path: i.path.map(String).join('.'), code: i.code }));
 }
+
+/** §5.5 優惠券 `limit_date`：Unix 秒，限 2000～2100 年（毫秒會超出範圍而被拒絕）。 */
+export const unixSecondsSchema = z.number().int().min(946684800).max(4102444800);

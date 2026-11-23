@@ -4,7 +4,7 @@ import { apiGet } from './api/endpoints';
 import { applyProductInfo, parseProductInfoResponse, toSnapshot, unavailableSnapshot } from './api/dlsite';
 import { nowIso } from './dates';
 import { isWorkId } from './ids';
-import { MAX_TRACKED_ITEMS, type Settings, type TrackedItem } from './models';
+import { MAX_NOT_FOUND_COUNT, MAX_TRACKED_ITEMS, type Settings, type TrackedItem } from './models';
 import type { WriteReply } from './messages';
 import { readItems, readSettings, readSnapshots, writeQueue, writeStore } from './storage';
 
@@ -27,11 +27,17 @@ async function waitForProductSlot(): Promise<void> {
 
 export type TrackSource = TrackedItem['source'];
 
-export async function trackItem(id: string, source: TrackSource): Promise<WriteReply> {
+export interface TrackOptions {
+  /** true：第一次查價做完才回覆（擴充功能頁面）。content script 的 track 不等（M2）。 */
+  awaitPrice?: boolean;
+}
+
+export async function trackItem(id: string, source: TrackSource, opts: TrackOptions = {}): Promise<WriteReply> {
   if (!isWorkId(id)) return { ok: false, reason: 'invalidId' };
-  const reply = await writeQueue(async (): Promise<WriteReply & { added?: boolean }> => {
+  const reply = await writeQueue(async (): Promise<WriteReply & { check?: boolean }> => {
     const items = await readItems();
-    if (items.has(id)) return { ok: true };
+    // 已在清單裡但還沒有價格（第一次查價失敗）時，再加一次就重新查價。
+    if (items.has(id)) return { ok: true, check: !(await readSnapshots()).has(id) };
     if (items.size >= MAX_TRACKED_ITEMS) return { ok: false, reason: 'limit' };
     items.set(id, {
       id,
@@ -44,11 +50,12 @@ export async function trackItem(id: string, source: TrackSource): Promise<WriteR
       paused: false,
     });
     await writeStore({ items });
-    return { ok: true, added: true };
+    return { ok: true, check: true };
   });
-  if (reply.ok && reply.added) {
-    // 不等查價完成就回覆；查價結果透過 storage.onChanged 更新畫面。
-    void refreshPrices([id]).catch(() => undefined);
+  if (reply.ok && reply.check) {
+    // 查價結果透過 storage.onChanged 更新畫面；失敗時畫面顯示「還沒有價格」與「重新查價」。
+    const job = refreshPrices([id]).catch((): RefreshResult => ({ ok: false, reason: 'failed' }));
+    if (opts.awaitPrice) await job;
   }
   return reply.ok ? { ok: true } : reply;
 }
@@ -80,24 +87,35 @@ export async function refreshPrices(ids: readonly string[]): Promise<RefreshResu
     const parsed = parseProductInfoResponse(res.text, batch);
     if (!parsed.ok) return { ok: false, reason: parsed.reason };
     const checkedAt = nowIso();
+    const invalidIds = new Set(parsed.invalid.map((x) => x.id));
     await writeQueue(async () => {
       const [curItems, snapshots] = await Promise.all([readItems(), readSnapshots()]);
       for (const id of batch) {
         const item = curItems.get(id);
         if (!item) continue; // 查價途中被移除
+        // §3.2.3：驗證失敗只讓這一筆失敗，不當成「查不到」，快照維持原樣。
+        if (invalidIds.has(id)) continue;
         const info = parsed.found.get(id);
         const prev = snapshots.get(id);
         const snap = info ? toSnapshot(info, prev, checkedAt) : unavailableSnapshot(prev, checkedAt);
-        if (info) curItems.set(id, applyProductInfo(item, info));
+        const next = info ? applyProductInfo(item, info) : item;
+        curItems.set(id, withNotFoundCount(next, !snap?.available));
         if (snap) snapshots.set(id, snap);
       }
       await writeStore({ items: curItems, snapshots });
     });
     updated += parsed.found.size;
     missing += parsed.missing.length;
-    invalid += new Set(parsed.invalid.map((x) => x.id)).size;
+    invalid += invalidIds.size;
   }
   return { ok: true, updated, missing, invalid };
+}
+
+/** 查不到（API 沒回傳、is_sold_out）時累加連續次數，查得到就清掉（§5.3）。 */
+function withNotFoundCount(item: TrackedItem, notFound: boolean): TrackedItem {
+  const { notFoundCount, ...rest } = item;
+  if (!notFound) return rest;
+  return { ...rest, notFoundCount: Math.min((notFoundCount ?? 0) + 1, MAX_NOT_FOUND_COUNT) };
 }
 
 export async function updateSettings(partial: Partial<Settings>): Promise<WriteReply> {

@@ -1,7 +1,16 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import { defaultSettings } from '../src/lib/models';
-import { createWriteQueue, parseSettings, readItems, readSettings, readSnapshots, writeStore } from '../src/lib/storage';
+import {
+  createWriteQueue,
+  lockStorageToTrustedContexts,
+  parseSettings,
+  readItems,
+  readSettings,
+  readSnapshots,
+  readStorageLock,
+  writeStore,
+} from '../src/lib/storage';
 
 beforeEach(() => {
   fakeBrowser.reset();
@@ -90,5 +99,30 @@ describe('write queue', () => {
     const enqueue = createWriteQueue();
     await expect(enqueue(async () => Promise.reject(new Error('x')))).rejects.toThrow('x');
     await expect(enqueue(async () => 1)).resolves.toBe(1);
+  });
+});
+
+describe('storage.local access level (§4.2)', () => {
+  it('records success in storage.session', async () => {
+    const spy = vi.spyOn(fakeBrowser.storage.local, 'setAccessLevel').mockResolvedValue(undefined);
+    expect(await lockStorageToTrustedContexts()).toBe(true);
+    expect(spy).toHaveBeenCalledWith({ accessLevel: 'TRUSTED_CONTEXTS' });
+    expect(await readStorageLock()).toMatchObject({ ok: true });
+    spy.mockRestore();
+  });
+
+  it('does not throw when setAccessLevel fails, but records and reports it', async () => {
+    const spy = vi.spyOn(fakeBrowser.storage.local, 'setAccessLevel').mockRejectedValue(new Error('not supported'));
+    const err = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    expect(await lockStorageToTrustedContexts()).toBe(false);
+    expect(await readStorageLock()).toMatchObject({ ok: false });
+    expect(err).toHaveBeenCalled();
+    spy.mockRestore();
+    err.mockRestore();
+  });
+
+  it('ignores a malformed record', async () => {
+    await fakeBrowser.storage.session.set({ storageLock: { ok: 'yes' } });
+    expect(await readStorageLock()).toBeUndefined();
   });
 });

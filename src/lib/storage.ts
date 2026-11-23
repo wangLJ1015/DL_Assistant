@@ -1,8 +1,11 @@
 // §4.2 storage 存取層。讀取：擴充功能頁面與 background；寫入：只有 background（透過 writeQueue）。
 // content script 不能 import 這個檔案（§3.2.5，ESLint 強制）。
 import { browser } from 'wxt/browser';
+import { z } from 'zod';
+import { nowIso } from './dates';
 import {
   defaultSettings,
+  isoSchema,
   priceSnapshotSchema,
   settingsSchema,
   trackedItemSchema,
@@ -90,7 +93,38 @@ export async function writeStore(patch: StorePatch): Promise<void> {
   if (Object.keys(out).length > 0) await browser.storage.local.set(out);
 }
 
-/** content script 不能直接讀寫 storage.local（§4.2）。每次 service worker 啟動與 onInstalled 都呼叫。 */
-export async function lockStorageToTrustedContexts(): Promise<void> {
-  await browser.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
+// ---- storage.local 存取層級（§4.2）----
+
+/** `storage.session` 的 key（session 預設只對受信任的環境開放）。 */
+export const SESSION_KEYS = {
+  storageLock: 'storageLock',
+} as const;
+
+const storageLockSchema = z.object({ ok: z.boolean(), at: isoSchema }).strict();
+export type StorageLockState = z.infer<typeof storageLockSchema>;
+
+/**
+ * content script 不能直接讀寫 storage.local（§4.2）。service worker 每次啟動、onInstalled、onStartup 都呼叫。
+ * 失敗時不丟例外：記在 storage.session 的 storageLock 並輸出錯誤，popup 顯示警告。
+ */
+export async function lockStorageToTrustedContexts(): Promise<boolean> {
+  let ok = true;
+  try {
+    await browser.storage.local.setAccessLevel({ accessLevel: 'TRUSTED_CONTEXTS' });
+  } catch (e) {
+    ok = false;
+    console.error('[DL_Assistant] storage.local.setAccessLevel 失敗，content script 可能讀得到 storage.local（§4.2）', e);
+  }
+  try {
+    await browser.storage.session.set({ [SESSION_KEYS.storageLock]: { ok, at: nowIso() } satisfies StorageLockState });
+  } catch {
+    // 記錄失敗不影響鎖定結果
+  }
+  return ok;
+}
+
+export async function readStorageLock(): Promise<StorageLockState | undefined> {
+  const got = await browser.storage.session.get(SESSION_KEYS.storageLock);
+  const r = storageLockSchema.safeParse(got[SESSION_KEYS.storageLock]);
+  return r.success ? r.data : undefined;
 }

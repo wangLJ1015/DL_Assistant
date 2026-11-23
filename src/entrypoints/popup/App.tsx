@@ -3,8 +3,9 @@ import { browser } from 'wxt/browser';
 import { WorkLink } from '../../components/WorkLink';
 import { isWorkId } from '../../lib/ids';
 import type { ExtMessage, WriteReply } from '../../lib/messages';
-import type { PriceSnapshot, TrackedItem } from '../../lib/models';
-import { readItems, readSnapshots, STORAGE_KEYS } from '../../lib/storage';
+import { NOT_FOUND_SUGGEST_REMOVE, type PriceSnapshot, type TrackedItem } from '../../lib/models';
+import { isOnSale } from '../../lib/rules';
+import { readItems, readSnapshots, readStorageLock, STORAGE_KEYS } from '../../lib/storage';
 
 interface Data {
   items: TrackedItem[];
@@ -47,17 +48,67 @@ const REASON_TEXT: Record<string, string> = {
   invalidId: '作品編號格式不正確',
   noReply: '背景程式沒有回應，請稍後再試',
   failed: '操作失敗，請稍後再試',
+  network: '連不上 DLsite，請稍後再試',
+  tooLarge: 'DLsite 回應異常',
+  unparsable: 'DLsite 回應異常',
+  notObject: 'DLsite 回應異常',
+  invalidData: 'DLsite 回傳的資料格式不符',
 };
+const reasonText = (reason: string) =>
+  REASON_TEXT[reason] ?? (/^httpd+$/.test(reason) ? `DLsite 回應錯誤（${reason.slice(4)}）` : REASON_TEXT.failed);
+
+/** setAccessLevel 失敗時顯示警告（§4.2）。 */
+function useStorageLockFailed(): boolean {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    readStorageLock().then(
+      (s) => setFailed(s?.ok === false),
+      () => undefined,
+    );
+  }, []);
+  return failed;
+}
 
 const yen = (n: number) => `¥${n.toLocaleString('ja-JP')}`;
 
-function PriceCell({ snap }: { snap: PriceSnapshot | undefined }) {
-  if (!snap) return <span className="text-gray-500">查價中…</span>;
-  if (!snap.available) return <span className="text-gray-500">目前查不到（上次 {yen(snap.price)}）</span>;
+interface PriceCellProps {
+  item: TrackedItem;
+  snap: PriceSnapshot | undefined;
+  checking: boolean;
+  error: string | undefined;
+  onRecheck: () => void;
+}
+
+function PriceCell({ item, snap, checking, error, onRecheck }: PriceCellProps) {
+  const misses = item.notFoundCount ?? 0;
+  const removeHint = misses >= NOT_FOUND_SUGGEST_REMOVE && (
+    <span className="ml-1 text-xs text-amber-700">連續 {misses} 次查不到，可以考慮移除</span>
+  );
+  if (checking) return <span className="text-gray-500">查價中…</span>;
+  if (!snap) {
+    // §5.3：第一次查價就查不到時顯示「查不到這個作品」，不寫快照。
+    if (misses > 0) return <span className="text-gray-500">查不到這個作品{removeHint}</span>;
+    return (
+      <span className="text-gray-500">
+        還沒有價格{error && <span className="ml-1 text-red-600">（{error}）</span>}
+        <button type="button" className="ml-2 text-xs text-blue-700 hover:underline" onClick={onRecheck}>
+          重新查價
+        </button>
+      </span>
+    );
+  }
+  if (!snap.available)
+    return (
+      <span className="text-gray-500">
+        目前查不到（上次 {yen(snap.price)}）{removeHint}
+      </span>
+    );
+  // §6：「打折中」一律用 isOnSale。
+  const onSale = isOnSale(snap, Date.now());
   return (
     <span>
-      <span className={snap.isDiscount ? 'font-bold text-red-600' : 'font-bold'}>{yen(snap.price)}</span>
-      {snap.isDiscount && (
+      <span className={onSale ? 'font-bold text-red-600' : 'font-bold'}>{yen(snap.price)}</span>
+      {onSale && (
         <span className="ml-1 text-xs text-gray-500">
           <s>{yen(snap.officialPrice)}</s> {snap.discountRate}% OFF
         </span>
@@ -71,6 +122,9 @@ export function App() {
   const [input, setInput] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [checking, setChecking] = useState<ReadonlySet<string>>(new Set());
+  const [checkErrors, setCheckErrors] = useState<ReadonlyMap<string, string>>(new Map());
+  const lockFailed = useStorageLockFailed();
 
   const add = useCallback(async () => {
     const id = input.trim().toUpperCase();
@@ -83,17 +137,38 @@ export function App() {
     const r = await send({ type: 'track', id, from: 'manual' });
     setBusy(false);
     if (r.ok) setInput('');
-    else setError(REASON_TEXT[r.reason] ?? REASON_TEXT.failed ?? null);
+    else setError(reasonText(r.reason) ?? null);
   }, [input]);
 
   const remove = useCallback(async (id: string) => {
     const r = await send({ type: 'untrack', id });
-    if (!r.ok) setError(REASON_TEXT[r.reason] ?? REASON_TEXT.failed ?? null);
+    if (!r.ok) setError(reasonText(r.reason) ?? null);
+  }, []);
+
+  const recheck = useCallback(async (id: string) => {
+    setChecking((s) => new Set(s).add(id));
+    const r = await send({ type: 'recheck', ids: [id] });
+    setChecking((s) => {
+      const next = new Set(s);
+      next.delete(id);
+      return next;
+    });
+    setCheckErrors((m) => {
+      const next = new Map(m);
+      if (r.ok) next.delete(id);
+      else next.set(id, reasonText(r.reason) ?? '');
+      return next;
+    });
   }, []);
 
   return (
     <main className="p-3 text-sm text-gray-900">
       <h1 className="mb-2 text-base font-bold">DL_Assistant</h1>
+      {lockFailed && (
+        <p role="alert" className="mb-2 rounded bg-amber-100 px-2 py-1 text-amber-900">
+          這個 Chrome 版本無法限制網頁程式讀取擴充功能的資料。請更新 Chrome。
+        </p>
+      )}
       <div className="flex gap-2">
         <input
           className="flex-1 rounded border border-gray-300 px-2 py-1 font-mono"
@@ -112,7 +187,7 @@ export function App() {
           disabled={busy}
           onClick={() => void add()}
         >
-          加入追蹤
+          {busy ? '加入中…' : '加入追蹤'}
         </button>
       </div>
       {error && (
@@ -132,7 +207,13 @@ export function App() {
               </button>
             </div>
             <div className="mt-1" data-testid="price">
-              <PriceCell snap={data.snapshots.get(item.id)} />
+              <PriceCell
+                item={item}
+                snap={data.snapshots.get(item.id)}
+                checking={checking.has(item.id)}
+                error={checkErrors.get(item.id)}
+                onRecheck={() => void recheck(item.id)}
+              />
             </div>
           </li>
         ))}

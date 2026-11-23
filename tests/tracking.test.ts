@@ -157,3 +157,53 @@ describe('untrack / settings', () => {
     expect((await readSettings()).dlwatcherEnabled).toBe(true);
   });
 });
+
+describe('M1 review fixes', () => {
+  const broken = () => {
+    const data = JSON.parse(FIXTURE) as Record<string, Record<string, unknown>>;
+    data.RJ01014447!.is_noreduction = null;
+    return JSON.stringify(data);
+  };
+
+  it('a record that fails validation keeps its snapshot instead of turning unavailable (§3.2.3)', async () => {
+    await trackItem('RJ01014447', 'manual');
+    await settle();
+    apiGet.mockResolvedValue({ ok: true, status: 200, text: broken() });
+    expect(await refreshPrices(['RJ01014447'])).toEqual({ ok: true, updated: 0, missing: 0, invalid: 1 });
+    expect((await readSnapshots()).get('RJ01014447')).toMatchObject({ available: true, price: 1386 });
+    expect((await readItems()).get('RJ01014447')!.notFoundCount).toBeUndefined();
+  });
+
+  it('counts consecutive not-found checks and clears the count once found (§5.3)', async () => {
+    apiGet.mockResolvedValue({ ok: true, status: 200, text: '[]' });
+    await trackItem('RJ01014447', 'manual', { awaitPrice: true });
+    expect((await readItems()).get('RJ01014447')!.notFoundCount).toBe(1);
+    __resetThrottleForTest();
+    await refreshPrices(['RJ01014447']);
+    __resetThrottleForTest();
+    await refreshPrices(['RJ01014447']);
+    expect((await readItems()).get('RJ01014447')!.notFoundCount).toBe(3);
+    expect((await readSnapshots()).size).toBe(0);
+    apiGet.mockResolvedValue({ ok: true, status: 200, text: FIXTURE });
+    __resetThrottleForTest();
+    await refreshPrices(['RJ01014447']);
+    expect((await readItems()).get('RJ01014447')!.notFoundCount).toBeUndefined();
+    expect((await readSnapshots()).get('RJ01014447')).toMatchObject({ available: true });
+  });
+
+  it('awaitPrice waits for the first check, and re-adding a work without a price checks again', async () => {
+    apiGet.mockResolvedValue({ ok: false, kind: 'network' });
+    expect(await trackItem('RJ01014447', 'manual', { awaitPrice: true })).toEqual({ ok: true });
+    expect(apiGet).toHaveBeenCalledTimes(1);
+    expect((await readSnapshots()).size).toBe(0);
+    apiGet.mockResolvedValue({ ok: true, status: 200, text: FIXTURE });
+    __resetThrottleForTest();
+    expect(await trackItem('RJ01014447', 'manual', { awaitPrice: true })).toEqual({ ok: true });
+    expect(apiGet).toHaveBeenCalledTimes(2);
+    expect((await readSnapshots()).get('RJ01014447')).toMatchObject({ available: true });
+    // 已經有價格時再加一次不會重新查價
+    __resetThrottleForTest();
+    await trackItem('RJ01014447', 'manual', { awaitPrice: true });
+    expect(apiGet).toHaveBeenCalledTimes(2);
+  });
+});

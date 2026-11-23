@@ -80,7 +80,11 @@ const ALLOWED_HOSTS = new Set(['www.dlsite.com', 'img.dlsite.jp', 'dlwatcher.com
 for (const file of jsFiles) {
   const rel = relative(OUT, file).replaceAll('\\', '/');
   const text = readFileSync(file, 'utf8');
-  if (/new\s+Function\s*\(/.test(text)) fail(`${rel}: contains new Function`);
+  // Function 建構子（含沒有 new 的 Function(...)）。唯一允許的是 zod 偵測 eval 是否可用的空字串探測 Function("")，
+  // 它不執行任何程式碼，而且 jitless 下不會被呼叫（§3.2.3）。
+  for (const m of text.matchAll(/(?<![.\w$])Function\s*\(([^)]*)\)/g)) {
+    if (!/^\s*(``|""|'')\s*$/.test(m[1]!)) fail(`${rel}: contains Function(${m[1]!.slice(0, 40)})`);
+  }
   if (/(^|[^.\w$])eval\s*\(/.test(text)) fail(`${rel}: contains eval(`);
   if (/mypage\/coupon(?!\/list\/ajax)/.test(text)) fail(`${rel}: contains /mypage/coupon (coupon issue endpoint)`);
   if (text.includes('/home/buy')) fail(`${rel}: contains /home/buy`);
@@ -107,6 +111,10 @@ if (!existsSync(contentPath)) {
     [/addEventListener\(\s*[`'"]message[`'"]/, "addEventListener('message')"],
     [/\bimport\s*\(/, 'dynamic import'],
     [/\.css\b/, 'CSS file reference'],
+    // 樣式裡的 url() 等會以 DLsite 頁面的身分發出帶 cookie 的請求（§3.2.5）
+    [/url\s*\(|@import|image-set\s*\(/i, 'url( / @import / image-set('],
+    [/setAttributeNode|createAttribute|insertRule|CSSStyleSheet|adoptedStyleSheets/, 'attribute node / stylesheet API'],
+    [/\.on(message|click|error|load)\s*=/, 'on* event handler property'],
   ];
   for (const [re, name] of forbidden) if (re.test(text)) fail(`${CONTENT_SCRIPT_FILE}: contains ${name}`);
 }

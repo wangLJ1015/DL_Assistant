@@ -102,3 +102,6 @@ export function unixSecondsToIso(sec: number): string {
 export function parseDlwatcherDate(_s: string): string | null {
   return null;
 }
+
+/** 測試用：regex 本身（§3.2.6 ReDoS 測試直接對 regex 餵長字串）。 */
+export const __regexForTest = { JST_FULL_RE, MMDD_RE, CANONICAL_ISO_RE };

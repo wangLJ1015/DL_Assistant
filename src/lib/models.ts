@@ -45,6 +45,10 @@ export function defaultSettings(): Settings {
   };
 }
 
+/** 連續查不到的次數上限（只是防止無限增加；達到 3 次就提示移除，§5.3）。 */
+export const MAX_NOT_FOUND_COUNT = 999;
+export const NOT_FOUND_SUGGEST_REMOVE = 3;
+
 export const trackedItemSchema = z
   .object({
     id: workIdSchema,
@@ -57,6 +61,7 @@ export const trackedItemSchema = z
     baselineAt: isoSchema.optional(),
     targetPrice: price.optional(),
     paused: z.boolean(),
+    notFoundCount: z.number().int().min(1).max(MAX_NOT_FOUND_COUNT).optional(),
   })
   .strict();
 export type TrackedItem = z.infer<typeof trackedItemSchema>;

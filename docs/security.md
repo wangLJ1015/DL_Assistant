@@ -102,11 +102,14 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
 - `dlsite-content.ts` 不使用 React、Tailwind、Chart.js。徽章與按鈕用原生 DOM（`createElement`＋`textContent`）建立。
 - 注入的 UI 由 content script 自己 `attachShadow({ mode: 'closed' })`，不依賴 WXT 的 `createShadowRootUi`。樣式寫成一段字串放進 shadow root 的 `<style>`（不含 `url()`、`@import`），不 import CSS 檔，所以不需要 `web_accessible_resources`，content script 裡也沒有載入 CSS 的網路請求（WXT 的 `createShadowRootUi` 會透過網路載入 CSS）。
 - content script 可以 import 的模組用 ESLint `no-restricted-imports` 列白名單：`lib/ids.ts`、`lib/text.ts`、`lib/selectors.ts`、`lib/messages.ts`、`lib/zod-setup.ts`、`lib/api/endpoints.ts`（content script 只用 `couponList`，其他端點有呼叫環境檢查）、`lib/coupons/parse.ts`、`lib/dates.ts`、`lib/schema.ts`（`intIn` 等 zod 工具，`coupons/parse.ts` 也要用）、`lib/badge-style.ts`（注入徽章的樣式字串）、`src/content/` 底下的 UI 檔案、zod、`wxt/utils/define-unlisted-script`。新增項目要改規格。（v0.8 加入 `schema.ts`、`badge-style.ts`：v0.7 的清單漏了它們。）
+- 白名單裡的「`src/content/` 底下的 UI 檔案」：`src/content/` 裡的檔案可以用 `./xxx` 互相 import；入口檔 `dlsite-content.ts` 在 `src/entrypoints/`，`./xxx` 會指到 `background` 等其他入口，所以只能用 `../content/xxx`。（v0.9：M1 審查發現入口檔寫 `import './background'` 不會被擋。）
 - content script 禁止使用 `chrome.storage`、`browser.storage` 與 `wxt/storage`（ESLint；`storage.local` 也已鎖住，§4.2），需要的資料一律由 background 回覆。
 - 建置時由一個 Vite plugin 在 `generateBundle` 讀取 content script chunk 的 `modules` 清單，輸出 `content-modules.json`（不需要 source map；若改用 source map，設 `build.sourcemap: 'hidden'`，並確認發佈的 zip 裡沒有 `.map` 檔）。`scripts/check-manifest.ts` 讀它列出 content script 包含的套件與大小，和上一版相比有新增套件就失敗，要人工確認；也確認打包檔不含 `react`、`storage.local`。
 - **content script 的 DOM 寫法另有 ESLint 規則**（只套用在 `dlsite-content.ts` 與 `src/content/` 底下的 UI 檔案）。原生 DOM 沒有 React 的保護，以下寫法都會以登入狀態對 DLsite 發 GET，而 §7.1 的 CSP 管不到 content script：
   - `document.createElement` 只能用 `div`、`span`、`button`、`style`；`createElementNS` 只能用 SVG 的 `svg`、`path`、`circle`、`rect`、`g`（不能用 `use`、`image`、`feImage`）。
-  - 禁止 `setAttribute` 的第一個參數是 `src`、`href`、`srcset`、`poster`、`data`、`action`、`formaction`、`ping`、`xlink:href`、`style` 或 `on` 開頭；禁止對 `src`、`href`、`srcset`、`action`、`cssText`、`innerHTML`、`outerHTML` 屬性指派；禁止 `style.setProperty`。清空元素用 `replaceChildren()`。
+  - 禁止 `setAttribute` 的第一個參數（`setAttributeNS` 的第二個參數）不是字面值，或是 `src`、`href`、`srcset`、`poster`、`data`、`action`、`formaction`、`ping`、`xlink:href`、`style` 或 `on` 開頭；禁止 `setAttributeNode`、`createAttribute`；禁止對 `src`、`href`、`srcset`、`action`、`style`、`cssText`、`innerHTML`、`outerHTML`、`adoptedStyleSheets` 屬性指派；禁止對 `element.style.*` 指派、`style.setProperty`、`insertRule`、`new CSSStyleSheet()`；字串與樣板字串不能含 `url(`、`@import`、`image-set(`（樣式一律放 `badge-style.ts`）。清空元素用 `replaceChildren()`。
+  - 禁止設定 `on*` 事件處理屬性（`window.onmessage = …`、`el.onclick = …`），監聽一律用 `addEventListener`；禁止用字串或樣板字串當屬性名稱取用（`obj['x']`），因為靠名稱比對的規則看不到。
+  - `check-manifest` 另外確認 content script 打包檔不含 `url(`、`@import`、`image-set(`、`setAttributeNode`、`createAttribute`、`insertRule`、`CSSStyleSheet`、`adoptedStyleSheets`、`.onmessage =` 等。（v0.9：M1 審查發現 `el.style.backgroundImage = 'url(…)'`、`setAttributeNS(null, 'style', …)`、`styleEl.textContent = '…url(…)'` 都能繞過 v0.8 的規則。）
   - 禁止呼叫 `.click()`、`.submit()`、`.requestSubmit()`、`.dispatchEvent()`、`.focus()`。content script 不操作 DLsite 頁面既有的元素，只讀選擇器取到的元素的 `textContent` 與 `href` 字串。
   - 注入的樣式字串定義在 `lib/badge-style.ts` 的單一常數，`check-manifest` 確認這段字串不含 `url(`、`@import`、`image-set(`。
   - `tests/lint-fixtures/content/` 放上面每一種寫法的範例檔。
@@ -169,7 +172,9 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
      - 禁止對 `location`、`location.href`、`document.location`、`top.location`、`self.location`、`globalThis.location` 指派，以及呼叫它們的 `assign`／`replace`。
      - `no-restricted-globals` 禁止裸的 `open`、`location`、`navigation`。
      - 禁止把 `chrome.tabs`、`chrome.windows`、`browser.tabs`、`browser.windows` 指派給變數或解構（`const { tabs } = browser` 這類別名）。
-     - 禁止 `as DlsiteNavUrl`／`as ExtPageUrl` 這類型別斷言（`TSAsExpression`、`TSTypeAssertion`），品牌型別擋不住斷言。
+     - 上面的規則靠名稱比對，所以**全部檔案**（含 `nav.ts`）都禁止：改名 import `browser`（`import { browser as b }`）、`import * as w from 'wxt/browser'`、把 `chrome`／`browser` 指派給變數或解構、用 `[...]` 取 `chrome`／`browser` 底下三層內的屬性（`chrome['tabs']`、`chrome.tabs['create']`）、`window['open']` 這類 `window`／`globalThis`／`self` 的 `[...]` 取用、`globalThis.chrome`。（v0.9：M1 審查發現這些寫法都能繞過。）
+     - 禁止 `as DlsiteNavUrl`／`as ExtPageUrl` 這類型別斷言（`TSAsExpression`、`TSTypeAssertion`），品牌型別擋不住斷言。斷言的型別裡任何位置出現品牌型別都算（`as N.DlsiteNavUrl`、`as import('./nav').DlsiteNavUrl`、聯集）；品牌型別也不能改名 import 或另取型別別名。
+     - `z.coerce` 的禁止涵蓋任何物件的 `.coerce`、`import { coerce }` 與字串 `'coerce'`；`onMessageExternal`／`onConnectExternal` 也禁止以字串出現。
      - 禁止 `document.createElement('a'|'form'|'area'|'meta'|'link'|'base'|'iframe')`。
      - `chrome.` 和 WXT 慣用的 `browser.` 都要涵蓋。
   4. **打包掃描**：`scripts/check-manifest.ts` 對 `.output/chrome-mv3/**/*.js` 檢查 `/mypage\/coupon(?!\/list\/ajax)/`、`/home/buy`，以及加入購物車的實際路徑（M2 確認後補上），出現就失敗。字串拼接或編碼過的網址掃不到，這一層只是最後的保險。
@@ -185,7 +190,10 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
   | `browser.tabs.create(…)`、`chrome.tabs.update(…)`、`navigation.navigate(…)`、`location.href = …`、`open(…)` | `no-restricted-syntax`／`no-restricted-globals` |
   | `const { tabs } = browser` | `no-restricted-syntax` |
   | `'https://…' as DlsiteNavUrl` | `no-restricted-syntax` |
+  | `import { browser as b }`、`chrome['tabs'].create(…)`、`window['open'](…)`、`as N.DlsiteNavUrl`、`type U = DlsiteNavUrl`、`import { coerce } from 'zod'` | `no-restricted-syntax` |
   | content script 的 `img.src = …`、`el.setAttribute('href', …)`、`el.click()`、`document.createElement('img')`、`chrome.storage.local.get(…)` | `no-restricted-syntax`（content script 專用設定，§3.2.5） |
+  | content script 的 `el.style.x = …`、`setAttributeNS(null, 'style', …)`、`setAttributeNode`、含 `url(` 的字串、`new CSSStyleSheet()`、`window.onmessage = …`、`const c = chrome`、`chrome['storage']` | `no-restricted-syntax` |
+  | `dlsite-content.ts` 的 `import './background'` | `no-restricted-imports` |
 - 單元測試：`buildWorkUrl` 對所有分站列舉值、`nav.ts` 的每個常數，都不能產生 `/home/mypage/coupon`、加入購物車的路徑、`/buy` 或任何帳號設定路徑。
 - 注入 DLsite 頁面的 UI 不放任何網址（§3.2.5）。
 - 擴充功能不提供「一鍵加入購物車」「前往結帳」「套用優惠券」這類按鈕。
@@ -228,7 +236,7 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
 - zod：使用 zod 4。zod 4 原始碼的 `$ZodConfig` 有 `jitless` 選項，`allowsEval` 是第一次需要時才計算並快取，所以只要在**第一次 parse 之前**呼叫 `z.config({ jitless: true })` 就有效。`lib/zod-setup.ts` 只做這件事，每個進入點（background、content script、各個擴充功能頁面、worker）的第一個 import 就是它。M1 在擴充功能頁面監聽 `securitypolicyviolation` 事件、background 看 console，跑一次完整的解析測試，確認沒有任何 CSP 違規。
 - 發佈前檢查 `.output/chrome-mv3/manifest.json`：沒有 `localhost`、沒有 `unsafe-eval`、`content_security_policy` 與 §7.1 一致、`minimum_chrome_version` 存在、沒有 `web_accessible_resources`。這一步寫成 `scripts/check-manifest.ts` 放在 CI（WXT 開發模式會放寬 CSP，不能把 dev build 拿去發佈）。
 - 同一支腳本也掃描 `.output/chrome-mv3/**/*.js`：
-  - 不能出現 `new Function`、`eval(`。
+  - 不能出現 `Function(...)`（有沒有 `new` 都算）、`eval(`。唯一例外是 zod 偵測 eval 能否使用的空字串探測 `Function("")`（不執行程式碼，jitless 下也不會被呼叫）。`[].constructor.constructor` 這類間接取得掃不到，靠 CSP（沒有 `unsafe-eval`）擋。
   - 字串裡出現的 `https://` 網域只能是 `www.dlsite.com`、`img.dlsite.jp`、`dlwatcher.com`（套件內建的說明網址另列白名單）。
   - 不能出現 `/mypage\/coupon(?!\/list\/ajax)/`、`/home/buy` 與加入購物車的路徑（§3.4 第 4 層）。
   - content script 打包檔的套件清單與上一版比對（§3.2.5）。

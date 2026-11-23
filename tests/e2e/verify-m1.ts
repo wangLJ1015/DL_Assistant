@@ -91,7 +91,7 @@ async function main() {
       if (e.method === 'Log.entryAdded') {
         const entry = e.params.entry as { level: string; text: string; url?: string };
         if (entry.level === 'error' || /Content Security Policy/i.test(entry.text))
-          problems.push(`[${e.sessionId === sw ? 'sw' : 'page'}] log: ${entry.text}`);
+          problems.push(`[${e.sessionId === sw ? 'sw' : 'page'}] log: ${entry.text}${entry.url ? ` (${entry.url})` : ''}`);
       }
       if (e.method === 'Runtime.consoleAPICalled' && (e.params.type === 'error' || e.params.type === 'warning')) {
         problems.push(
@@ -101,6 +101,17 @@ async function main() {
     });
     await cdp.send('Runtime.enable', {}, sw);
     await cdp.send('Log.enable', {}, sw);
+    // 刻意觸發違規的區段：只有這些區段裡的錯誤不算進最後的 jitless 檢查
+    const expectedWindows: [number, number][] = [];
+    const expectProblems = async <T>(fn: () => Promise<T>): Promise<T> => {
+      const start = problems.length;
+      try {
+        return await fn();
+      } finally {
+        await sleep(300);
+        expectedWindows.push([start, problems.length]);
+      }
+    };
 
     // ---- §3.4：service worker 的呼叫環境檢查 ----
     const env = (await evaluate(
@@ -143,7 +154,7 @@ async function main() {
           { urlPattern: 'https://example.com/*' },
           { urlPattern: '*mypage/coupon*' },
           { urlPattern: 'https://dlwatcher.com/*' },
-          { urlPattern: '*.css' },
+          { urlPattern: 'https://*.css' },
         ],
       },
       pg,
@@ -221,7 +232,35 @@ async function main() {
       JSON.stringify(s),
     );
 
+    // ---- §4.2 background 記錄的鎖定結果 ----
+    const lock = (await evaluate(cdp, pg, `chrome.storage.session.get('storageLock').then((v) => v.storageLock ?? null)`)) as {
+      ok?: boolean;
+    } | null;
+    record('background 記錄 setAccessLevel 成功（storage.session 的 storageLock）', lock?.ok === true, JSON.stringify(lock));
+
+    // ---- CSP img-src 放行 img.dlsite.jp（作品圖片）----
+    const imageUrl = (await evaluate(
+      cdp,
+      pg,
+      `chrome.storage.local.get('items').then((v) => (v.items ?? []).find((i) => i.id === '${TEST_WORK}')?.imageUrl ?? '')`,
+    )) as string;
+    const okImg = imageUrl
+      ? await evaluate(
+          cdp,
+          pg,
+          `new Promise((r) => { const i = new Image(); i.onload = () => r('loaded'); i.onerror = () => r('error'); i.src = ${JSON.stringify(imageUrl)}; setTimeout(() => r('timeout'), 10000); })`,
+        )
+      : 'no imageUrl';
+    await sleep(200);
+    const imgViolations = ((await evaluate(cdp, pg, `window.__csp`)) as { directive: string }[]).filter((v) => v.directive === 'img-src');
+    record(
+      'CSP img-src 放行 img.dlsite.jp 的作品圖片',
+      imageUrl.startsWith('https://img.dlsite.jp/') && okImg === 'loaded' && imgViolations.length === 0,
+      `${imageUrl.slice(0, 60)} → ${String(okImg)}`,
+    );
+
     // ---- §10.3 收緊的 CSP（擴充功能頁面）----
+    const cspProbeStart = problems.length;
     const cspFetch = await evaluate(
       cdp,
       pg,
@@ -243,6 +282,7 @@ async function main() {
       `new Promise((r) => { const i = new Image(); i.onload = () => r('loaded'); i.onerror = () => r('error'); i.src = 'https://www.dlsite.com/images/web/home/no_img_main.gif'; setTimeout(() => r('timeout'), 3000); })`,
     );
     await sleep(300);
+    expectedWindows.push([cspProbeStart, problems.length]);
     const violations = (await evaluate(cdp, pg, `window.__csp`)) as { directive: string; blocked: string }[];
     const has = (d: string) => violations.some((v) => v.directive === d);
     const sawCoupon = intercepted.some((r) => r.url.includes('mypage/coupon'));
@@ -270,12 +310,13 @@ async function main() {
     );
 
     // ---- §10.3 fetch 與 User-Agent ----
-    await evaluate(
-      cdp,
-      pg,
-      `fetch('https://dlwatcher.com/product/RJ01014447.json', { headers: { 'User-Agent': 'dl-assistant-ua-test' } }).then(() => 'ok', (e) => 'error: ' + e.message)`,
+    await expectProblems(() =>
+      evaluate(
+        cdp,
+        pg,
+        `fetch('https://dlwatcher.com/product/RJ01014447.json', { headers: { 'User-Agent': 'dl-assistant-ua-test' } }).then(() => 'ok', (e) => 'error: ' + e.message)`,
+      ),
     );
-    await sleep(300);
     const uaReq = intercepted.find((r) => r.url.startsWith('https://dlwatcher.com/'));
     const sentUa = uaReq
       ? String(Object.entries(uaReq.headers).find(([k]) => k.toLowerCase() === 'user-agent')?.[1] ?? '')
@@ -288,12 +329,14 @@ async function main() {
     );
 
     // ---- §10.3 meta refresh（最後做，可能會離開頁面）----
+    const metaStart = problems.length;
     await evaluate(
       cdp,
       pg,
       `(() => { const m = document.createElement('meta'); m.httpEquiv = 'refresh'; m.content = '0;url=https://example.com/meta'; document.head.append(m); return true; })()`,
     );
     await sleep(2500);
+    expectedWindows.push([metaStart, problems.length]);
     const afterMeta = (await evaluate(cdp, pg, `location.href`)) as string;
     const metaReq = intercepted.some((r) => r.url.startsWith('https://example.com/meta'));
     note(
@@ -302,7 +345,9 @@ async function main() {
     );
 
     // ---- service worker 的 CSP（connect-src 也約束 background）----
-    const swFetch = await evaluate(cdp, sw, `fetch('https://www.dlsite.com/home/').then(() => 'allowed', (e) => 'blocked: ' + e.message)`);
+    const swFetch = await expectProblems(() =>
+      evaluate(cdp, sw, `fetch('https://www.dlsite.com/home/').then(() => 'allowed', (e) => 'blocked: ' + e.message)`),
+    );
     record('CSP connect-src 也擋住 service worker 對白名單外路徑的請求', String(swFetch).startsWith('blocked'), String(swFetch));
 
     // ---- §4.2 setAccessLevel：content script 呼叫 storage.local 會失敗 ----
@@ -361,13 +406,8 @@ async function main() {
     }
 
     // ---- zod jitless：整個流程沒有 CSP 違規或例外（§7.2）----
-    const relevant = problems.filter(
-      // 上面刻意觸發的違規與被攔截的請求不算
-      (p) =>
-        !/mypage\/coupon|example\.com|x\.css|no_img_main|dlwatcher\.com|www\.dlsite\.com\/home\/'?|ERR_BLOCKED_BY_CLIENT|Refused to (connect|load|send form|frame)/.test(
-          p,
-        ),
-    );
+    // 只排除上面刻意觸發違規的區段（以發生的先後判斷，不比對訊息內容）
+    const relevant = problems.filter((_, i) => !expectedWindows.some(([a, b]) => i >= a && i < b));
     record(
       '解析過程沒有 eval／CSP 違規或未處理的例外（zod jitless，§7.2）',
       relevant.length === 0,
