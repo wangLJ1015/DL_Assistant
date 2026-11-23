@@ -17,6 +17,7 @@
     "test": "vitest run",
     "check:manifest": "node scripts/check-manifest.ts",
     "verify:chrome": "node tests/e2e/verify-m1.ts",
+    "verify:m2": "node tests/e2e/verify-m2.ts",
     "check:all": "prettier --check . && eslint . && tsc --noEmit && vitest run && wxt build && node scripts/check-manifest.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

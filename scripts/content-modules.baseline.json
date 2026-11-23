@@ -1,0 +1,4 @@
+{
+  "$comment": "§3.2.5：content script 可以打包進去的套件。check-manifest 發現清單外的套件就失敗；確認安全後才加進來（改規格）。",
+  "packages": ["@wxt-dev/browser", "wxt", "zod"]
+}

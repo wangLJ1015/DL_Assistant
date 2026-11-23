@@ -1,15 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
 import { browser } from 'wxt/browser';
+import { NavLink } from '../../components/NavLink';
 import { WorkLink } from '../../components/WorkLink';
 import { isWorkId } from '../../lib/ids';
 import type { ExtMessage, WriteReply } from '../../lib/messages';
 import { NOT_FOUND_SUGGEST_REMOVE, type PriceSnapshot, type TrackedItem } from '../../lib/models';
 import { isOnSale } from '../../lib/rules';
-import { readItems, readSnapshots, readStorageLock, STORAGE_KEYS } from '../../lib/storage';
+import { jstDate, nowIso } from '../../lib/dates';
+import { readDailyAutoAdd, readItems, readSnapshots, readStorageLock, STORAGE_KEYS } from '../../lib/storage';
 
 interface Data {
   items: TrackedItem[];
   snapshots: Map<string, PriceSnapshot>;
+  /** 今天因為上限沒有自動加入的件數（§3.2.4）。 */
+  autoAddSkipped: number;
 }
 
 /** 擴充功能頁面直接讀 storage，並用 onChanged 更新（§4.2）。 */
@@ -18,12 +22,18 @@ function useTrackedData(): Data | null {
   useEffect(() => {
     let alive = true;
     const load = async () => {
-      const [items, snapshots] = await Promise.all([readItems(), readSnapshots()]);
-      if (alive) setData({ items: [...items.values()].sort((a, b) => b.addedAt.localeCompare(a.addedAt)), snapshots });
+      const [items, snapshots, daily] = await Promise.all([readItems(), readSnapshots(), readDailyAutoAdd(jstDate(nowIso()))]);
+      if (alive)
+        setData({
+          items: [...items.values()].sort((a, b) => b.addedAt.localeCompare(a.addedAt)),
+          snapshots,
+          autoAddSkipped: daily.skipped,
+        });
     };
     void load();
     const onChanged = (changes: Record<string, unknown>, area: string) => {
-      if (area === 'local' && (STORAGE_KEYS.items in changes || STORAGE_KEYS.snapshots in changes)) void load();
+      if (area === 'local' && (STORAGE_KEYS.items in changes || STORAGE_KEYS.snapshots in changes || STORAGE_KEYS.dailyAutoAdd in changes))
+        void load();
     };
     browser.storage.onChanged.addListener(onChanged);
     return () => {
@@ -195,6 +205,15 @@ export function App() {
           {error}
         </p>
       )}
+      {data && data.autoAddSkipped > 0 && (
+        <p role="status" className="mt-2 rounded bg-amber-100 px-2 py-1 text-amber-900">
+          今天有 {data.autoAddSkipped} 件作品沒有自動加入（超過上限），請到
+          <NavLink name="cart" className="mx-1 text-blue-700 underline">
+            購物車頁
+          </NavLink>
+          確認。
+        </p>
+      )}
       <ul className="mt-3 divide-y divide-gray-200" aria-label="追蹤清單">
         {data?.items.map((item) => (
           <li key={item.id} className="py-2" data-work-id={item.id}>
@@ -202,9 +221,16 @@ export function App() {
               <WorkLink site={item.site} id={item.id} className="line-clamp-2 text-blue-700 hover:underline">
                 {item.title || item.id}
               </WorkLink>
-              <button type="button" className="shrink-0 text-xs text-gray-500 hover:text-red-600" onClick={() => void remove(item.id)}>
-                移除
-              </button>
+              <span className="flex shrink-0 items-center gap-2">
+                {item.autoAdded && (
+                  <span className="rounded bg-gray-100 px-1 text-xs text-gray-600" data-testid="auto-added">
+                    {item.source === 'page' ? '從作品頁加入' : '自動加入'}
+                  </span>
+                )}
+                <button type="button" className="text-xs text-gray-500 hover:text-red-600" onClick={() => void remove(item.id)}>
+                  移除
+                </button>
+              </span>
             </div>
             <div className="mt-1" data-testid="price">
               <PriceCell

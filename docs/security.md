@@ -81,7 +81,7 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
 - 擴充功能頁面**讀取**資料時直接讀 `chrome.storage.local` 與 IndexedDB，不經過訊息；**寫入**一律送訊息給 background（§4.2）。
 - 每種訊息都用 zod 驗證，作品編號都要通過 `isWorkId()`。來自 content script 的優惠券資料，background 要再跑一次完整的 zod 驗證，並檢查同步 token（§5.4）。
 - background 不提供「幫我抓這個網址」之類的通用訊息。content script 只送作品編號，網址由 background 自己組。`openPage` 只能開擴充功能自己的儀表板或 `lookup.html`。
-- `cartSnapshot` 只接受 `sender.url` 的路徑是購物車頁（實際路徑 M2 確認後寫進 `selectors.ts`）的訊息，同一個 `sender.documentId` 只接受一次。
+- `cartSnapshot` 只接受 `sender.url` 的路徑是購物車頁（`/<分站>/cart` 或 `/<分站>/cart/`，各分站共用同一個購物車；M2 實測，寫在 `selectors.ts`）的訊息，同一個 `sender.documentId` 只接受一次（沒有 `documentId` 也拒絕）。`sender.url` 是文件載入時的網址，頁面 `history.pushState` 之後不會改變（M2 實測），所以頁面腳本無法把作品頁偽裝成購物車頁。
 - 「同一個 `documentId` 只接受一次」的紀錄存在 `storage.session` 的 `seenDocuments`（`{ badge, cart, track }` 各是 `[documentId, at][]`，各保留最近 500 筆，超過 1 小時的刪除），service worker 重啟後仍然有效。
 - **數量與頻率上限**（計數存在 `storage.session` 的 `rateCounters`）：
   - 一次 `cartSnapshot` 最多 200 個編號，其中最多新增 50 件到追蹤清單。
@@ -95,16 +95,16 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
 - 程式裡不註冊 `(chrome|browser).runtime.onMessageExternal`／`onConnectExternal`（ESLint 全面禁止；manifest 也鎖住，見 §7.1）。
 
 #### 3.2.5 content script 範圍與注入的 UI
-- content script 的 `matches` 為 `https://www.dlsite.com/*`，`exclude_matches` 排除結帳、付款、帳號設定相關路徑（實際路徑見 §10.3）；`all_frames: false`。
+- content script 的 `matches` 為 `https://www.dlsite.com/*`，`exclude_matches` 排除結帳、付款、帳號設定相關路徑：`https://www.dlsite.com/*/pay/*`（立即購買與付款）、`*/mypage/*`（マイページ，含帳號設定與優惠券）、`*/login*`、`*/regist/*`（M2 實測，§10.3；值在 `scripts/manifest-policy.ts`，`check-manifest` 確認完全一致）。購物車頁要讀作品清單（F2），不排除；結帳由購物車頁的表單 POST 到 `/<分站>/cart` 進入付款流程。`all_frames: false`。
 
 **content script 只放最少的程式碼。** content script 是唯一帶登入 cookie 的環境，它的請求以 DLsite 頁面的來源送出，**不受擴充功能 CSP 的 `connect-src` 約束**。打包進 content script 的任何相依套件，只要有一個被植入惡意版本，就能以登入狀態呼叫 `/home/mypage/coupon` 等帳號端點。所以：
 - content script 的進入點是 `src/entrypoints/dlsite-content.ts`，用 WXT 的 `defineUnlistedScript` 打包，`content_scripts` 由 `wxt.config.ts` 自己寫進 manifest。**不用** WXT 的 `defineContentScript`：它的 `ContentScriptContext` 會對頁面 `document` 派送 `CustomEvent`、呼叫 `window.postMessage(..., '*')`（事件名稱含擴充功能 ID），並監聽頁面上的同名事件。頁面腳本因此能得知擴充功能 ID，也能派送假事件讓 content script 自我停用（M1 從打包結果確認）。`check-manifest` 確認 content script 打包檔不含 `postMessage`、`CustomEvent`、`dispatchEvent`、`addEventListener('message')`。
 - `dlsite-content.ts` 不使用 React、Tailwind、Chart.js。徽章與按鈕用原生 DOM（`createElement`＋`textContent`）建立。
 - 注入的 UI 由 content script 自己 `attachShadow({ mode: 'closed' })`，不依賴 WXT 的 `createShadowRootUi`。樣式寫成一段字串放進 shadow root 的 `<style>`（不含 `url()`、`@import`），不 import CSS 檔，所以不需要 `web_accessible_resources`，content script 裡也沒有載入 CSS 的網路請求（WXT 的 `createShadowRootUi` 會透過網路載入 CSS）。
-- content script 可以 import 的模組用 ESLint `no-restricted-imports` 列白名單：`lib/ids.ts`、`lib/text.ts`、`lib/selectors.ts`、`lib/messages.ts`、`lib/zod-setup.ts`、`lib/api/endpoints.ts`（content script 只用 `couponList`，其他端點有呼叫環境檢查）、`lib/coupons/parse.ts`、`lib/dates.ts`、`lib/schema.ts`（`intIn` 等 zod 工具，`coupons/parse.ts` 也要用）、`lib/badge-style.ts`（注入徽章的樣式字串）、`src/content/` 底下的 UI 檔案、zod、`wxt/utils/define-unlisted-script`。新增項目要改規格。（v0.8 加入 `schema.ts`、`badge-style.ts`：v0.7 的清單漏了它們。）
+- content script 可以 import 的模組用 ESLint `no-restricted-imports` 列白名單：`lib/ids.ts`、`lib/text.ts`、`lib/selectors.ts`、`lib/messages.ts`、`lib/zod-setup.ts`、`lib/api/endpoints.ts`（content script 只用 `couponList`，其他端點有呼叫環境檢查）、`lib/coupons/parse.ts`、`lib/dates.ts`、`lib/schema.ts`（`intIn` 等 zod 工具，`coupons/parse.ts` 也要用）、`lib/badge-style.ts`（注入徽章的樣式字串）、`src/content/` 底下的 UI 檔案、zod、`wxt/utils/define-unlisted-script`、`wxt/browser`（只有一行 `globalThis.browser ?? chrome`，送訊息用；`browser.storage` 仍由 ESLint 禁止。v0.10 加入）。新增項目要改規格。（v0.8 加入 `schema.ts`、`badge-style.ts`：v0.7 的清單漏了它們。）
 - 白名單裡的「`src/content/` 底下的 UI 檔案」：`src/content/` 裡的檔案可以用 `./xxx` 互相 import；入口檔 `dlsite-content.ts` 在 `src/entrypoints/`，`./xxx` 會指到 `background` 等其他入口，所以只能用 `../content/xxx`。（v0.9：M1 審查發現入口檔寫 `import './background'` 不會被擋。）
 - content script 禁止使用 `chrome.storage`、`browser.storage` 與 `wxt/storage`（ESLint；`storage.local` 也已鎖住，§4.2），需要的資料一律由 background 回覆。
-- 建置時由一個 Vite plugin 在 `generateBundle` 讀取 content script chunk 的 `modules` 清單，輸出 `content-modules.json`（不需要 source map；若改用 source map，設 `build.sourcemap: 'hidden'`，並確認發佈的 zip 裡沒有 `.map` 檔）。`scripts/check-manifest.ts` 讀它列出 content script 包含的套件與大小，和上一版相比有新增套件就失敗，要人工確認；也確認打包檔不含 `react`、`storage.local`。
+- 建置時由 `scripts/content-modules-plugin.ts`（Vite plugin）在 `generateBundle` 讀取 content script chunk 的 `modules` 清單，輸出 `.output/content-modules.json`（不放進擴充功能，也不需要 source map；M2 實測可行）。`scripts/check-manifest.ts` 讀它列出 content script 包含的套件，和 `scripts/content-modules.baseline.json`（目前是 `@wxt-dev/browser`、`wxt`、`zod`）比對，出現清單外的套件就失敗，要人工確認後才加進清單；也確認打包檔不含 `react`、`storage.local`。
 - **content script 的 DOM 寫法另有 ESLint 規則**（只套用在 `dlsite-content.ts` 與 `src/content/` 底下的 UI 檔案）。原生 DOM 沒有 React 的保護，以下寫法都會以登入狀態對 DLsite 發 GET，而 §7.1 的 CSP 管不到 content script：
   - `document.createElement` 只能用 `div`、`span`、`button`、`style`；`createElementNS` 只能用 SVG 的 `svg`、`path`、`circle`、`rect`、`g`（不能用 `use`、`image`、`feImage`）。
   - 禁止 `setAttribute` 的第一個參數（`setAttributeNS` 的第二個參數）不是字面值，或是 `src`、`href`、`srcset`、`poster`、`data`、`action`、`formaction`、`ping`、`xlink:href`、`style` 或 `on` 開頭；禁止 `setAttributeNode`、`createAttribute`；禁止對 `src`、`href`、`srcset`、`action`、`style`、`cssText`、`innerHTML`、`outerHTML`、`adoptedStyleSheets` 屬性指派；禁止對 `element.style.*` 指派、`style.setProperty`、`insertRule`、`new CSSStyleSheet()`；字串與樣板字串不能含 `url(`、`@import`、`image-set(`（樣式一律放 `badge-style.ts`）。清空元素用 `replaceChildren()`。
@@ -158,7 +158,7 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
 - 單元測試測**行為**：對 `/home/mypage/coupon`、`/home/mypage/coupon?x=1`、`/home/mypage/coupon/`、`/home/mypage/coupon/list`、`/home/cart`、`/home/buy`、`https://login.dlsite.com/` 呼叫 `assertAllowed()`，每一個都要丟例外；`product_id` 含非法編號、重複參數、帶 `#hash` 的網址也要丟例外。白名單的筆數用快照測試鎖住，新增端點必須同時改測試。
 
 **導覽與資源載入也算帶 cookie 的 GET。** 開分頁、點連結、載入圖片都會以登入狀態對 DLsite 發 GET，不經過 `apiGet`，擴充功能頁面的 CSP 也管不到導覽。
-- 擴充功能開啟 DLsite 網址（開分頁、開視窗、連結、通知點擊）只能用兩種來源：`lib/ids.ts` 的 `buildWorkUrl(site, id)`，以及 `lib/nav.ts` 裡固定的常數。常數目前只有購物車頁（實際網址 M2 確認）。
+- 擴充功能開啟 DLsite 網址（開分頁、開視窗、連結、通知點擊）只能用兩種來源：`lib/ids.ts` 的 `buildWorkUrl(site, id)`，以及 `lib/nav.ts` 裡固定的常數。常數目前只有購物車頁 `https://www.dlsite.com/home/cart/`（M2 確認；打開購物車頁只是瀏覽，加入／移除購物車是別的路徑）。
 - **不提供優惠券管理頁的連結**：它和領券端點只差 `/list`，而導覽一定會跟隨轉址。需要引導你看券時，畫面用文字說明「DLsite → マイページ → クーポン管理」。日後真的要加，先在 §10.3 確認這個頁面在未登入與登入時都不會轉址到 `/home/mypage/coupon`。
 - 這條規則用四層防線**降低機率**。四層都只檢查我們自己的原始碼，以及打包結果裡完整出現的字串；CSP 管不到導覽，所以**相依套件被植入惡意版本時仍能導覽到任何網址**（列在 §11 風險表）：
   1. **型別**：`lib/nav.ts` 匯出品牌型別 `type DlsiteNavUrl = string & { readonly __brand: 'DlsiteNavUrl' }`，只有 `buildWorkUrl()` 與 `nav.ts` 的常數能產生這個型別。`nav.ts` 的 `openTab(url: DlsiteNavUrl | ExtPageUrl)` 與 `openPopupWindow(...)` 是開分頁與視窗的唯一函式（`ExtPageUrl` 只能由 `chrome.runtime.getURL()` 組出的擴充功能頁面網址產生）。
@@ -177,7 +177,7 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
      - `z.coerce` 的禁止涵蓋任何物件的 `.coerce`、`import { coerce }` 與字串 `'coerce'`；`onMessageExternal`／`onConnectExternal` 也禁止以字串出現。
      - 禁止 `document.createElement('a'|'form'|'area'|'meta'|'link'|'base'|'iframe')`。
      - `chrome.` 和 WXT 慣用的 `browser.` 都要涵蓋。
-  4. **打包掃描**：`scripts/check-manifest.ts` 對 `.output/chrome-mv3/**/*.js` 檢查 `/mypage\/coupon(?!\/list\/ajax)/`、`/home/buy`，以及加入購物車的實際路徑（M2 確認後補上），出現就失敗。字串拼接或編碼過的網址掃不到，這一層只是最後的保險。
+  4. **打包掃描**：`scripts/check-manifest.ts` 對 `.output/chrome-mv3/**/*.js` 檢查 `/mypage\/coupon(?!\/list\/ajax)/`、`/home/buy`，以及加入購物車的實際路徑：列表頁的 GET 連結 `/<分站>/cart/=/product_id/<ID>.html` 與作品頁按鈕的 `POST /api/cart/<分站>/add`（M2 實測；購物車頁的移除連結 `/<分站>/cart/ajax/=/mode/cart_remove/…` 也是 GET），掃描 `/cart/=/product_id`、`/api/cart/`，出現就失敗（`selectors.ts` 的 regex 寫成跳脫的斜線，不會被掃到）。字串拼接或編碼過的網址掃不到，這一層只是最後的保險。
 - **規則自我測試**：`tests/lint-fixtures/` 對每一種違規寫法各放一個範例檔，並在檔名或檔頭註明**應該擋下它的規則**，CI 確認 ESLint 對每個檔案都以那條規則報錯（避免規則寫錯而永遠不觸發，也避免「沒有任何規則會擋」的範例讓 CI 一直失敗）。至少包含：
 
   | 範例 | 擋下的規則 |

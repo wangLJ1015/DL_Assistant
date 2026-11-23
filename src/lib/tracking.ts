@@ -27,6 +27,20 @@ async function waitForProductSlot(): Promise<void> {
 
 export type TrackSource = TrackedItem['source'];
 
+/** 新加入的追蹤項目。名稱、圖片、分站在第一次查價後補上（§5.3）。 */
+export function newTrackedItem(id: string, source: TrackSource): TrackedItem {
+  return {
+    id,
+    site: 'maniax',
+    title: '',
+    imageUrl: '',
+    addedAt: nowIso(),
+    source,
+    autoAdded: source === 'cart' || source === 'page',
+    paused: false,
+  };
+}
+
 export interface TrackOptions {
   /** true：第一次查價做完才回覆（擴充功能頁面）。content script 的 track 不等（M2）。 */
   awaitPrice?: boolean;
@@ -39,16 +53,7 @@ export async function trackItem(id: string, source: TrackSource, opts: TrackOpti
     // 已在清單裡但還沒有價格（第一次查價失敗）時，再加一次就重新查價。
     if (items.has(id)) return { ok: true, check: !(await readSnapshots()).has(id) };
     if (items.size >= MAX_TRACKED_ITEMS) return { ok: false, reason: 'limit' };
-    items.set(id, {
-      id,
-      site: 'maniax',
-      title: '',
-      imageUrl: '',
-      addedAt: nowIso(),
-      source,
-      autoAdded: source === 'cart' || source === 'page',
-      paused: false,
-    });
+    items.set(id, newTrackedItem(id, source));
     await writeStore({ items });
     return { ok: true, check: true };
   });

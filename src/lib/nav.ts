@@ -8,10 +8,13 @@ export type DlsiteNavUrl = string & { readonly __brand: 'DlsiteNavUrl' };
 export type ExtPageUrl = string & { readonly __brand: 'ExtPageUrl' };
 
 /**
- * 固定的 DLsite 網址常數。目前只預定放購物車頁，實際網址在 M2 確認後才加入（§3.4）。
+ * 固定的 DLsite 網址常數（§3.4）。只有購物車頁（2026-11-23 實測；各分站共用同一個購物車）。
+ * 打開購物車頁只是瀏覽（GET），加入／移除購物車是別的路徑（/cart/=/product_id/…、/cart/ajax/…、/api/cart/…）。
  * 不提供優惠券管理頁（§3.4「不提供優惠券管理頁的連結」）。
  */
-export const NAV_URLS = {} as const satisfies Record<string, DlsiteNavUrl>;
+export const NAV_URLS = {
+  cart: 'https://www.dlsite.com/home/cart/' as DlsiteNavUrl,
+} as const satisfies Record<string, DlsiteNavUrl>;
 export type NavName = keyof typeof NAV_URLS;
 
 export type ExtPage = 'dashboard' | 'lookup' | 'planner';

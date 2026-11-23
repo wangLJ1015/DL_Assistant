@@ -185,7 +185,7 @@ const JSX_RUNTIME_PATHS = [
 ];
 /** §3.2.5 content script 可以 import 的模組（白名單以外一律禁止）。 */
 const CONTENT_ALLOWED = 'ids|text|selectors|messages|zod-setup|api/endpoints|coupons/parse|dates|schema|badge-style';
-const CONTENT_IMPORT_BASE = `(?!(?:(?:\\.\\.?/)+lib/|@/lib/)(?:${CONTENT_ALLOWED})$)(?!(?:\\.\\./)+content/[a-z-]+$)(?!zod$)(?!wxt/utils/define-unlisted-script$)`;
+const CONTENT_IMPORT_BASE = `(?!(?:(?:\\.\\.?/)+lib/|@/lib/)(?:${CONTENT_ALLOWED})$)(?!(?:\\.\\./)+content/[a-z-]+$)(?!zod$)(?!wxt/utils/define-unlisted-script$)(?!wxt/browser$)`;
 /** src/content/ 底下的檔案可以互相 import（./xxx）。 */
 const CONTENT_IMPORT_REGEX = `^${CONTENT_IMPORT_BASE}(?!\\./[a-z-]+$)`;
 /** 入口檔在 src/entrypoints/，./xxx 會指到 background 等其他入口，所以不允許（只能用 ../content/xxx）。 */

@@ -23,5 +23,16 @@ export const DEV_MANIFEST_CSP = MANIFEST_CSP.replace(
 export const MINIMUM_CHROME_VERSION = '120';
 
 export const CONTENT_SCRIPT_MATCHES = ['https://www.dlsite.com/*'] as const;
+/**
+ * §3.2.5：結帳、付款、帳號相關頁面不注入 content script（2026-11-23 實測的路徑，§10.3）。
+ * 立即購買：/<分站>/pay/…；マイページ（含帳號設定、優惠券）：/<分站>/mypage/…；登入：/<分站>/login/…；註冊：/<分站>/regist/…。
+ * 購物車頁（/<分站>/cart/）要讀作品清單（F2），不排除。
+ */
+export const CONTENT_SCRIPT_EXCLUDE_MATCHES = [
+  'https://www.dlsite.com/*/pay/*',
+  'https://www.dlsite.com/*/mypage/*',
+  'https://www.dlsite.com/*/login*',
+  'https://www.dlsite.com/*/regist/*',
+] as const;
 /** src/entrypoints/dlsite-content.ts 的打包結果。 */
 export const CONTENT_SCRIPT_FILE = 'dlsite-content.js';

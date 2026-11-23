@@ -100,3 +100,24 @@ export type PriceSnapshot = z.infer<typeof priceSnapshotSchema>;
 
 /** 追蹤清單總數上限（§3.2.4）。 */
 export const MAX_TRACKED_ITEMS = 1000;
+
+// ---- 自動加入（§3.2.4）----
+
+/** content script 的 cartClicked、cartSnapshot、track 合計每天最多自動新增的件數。 */
+export const DAILY_AUTO_ADD_LIMIT = 200;
+/** 一次 cartSnapshot 最多新增的件數。 */
+export const CART_SNAPSHOT_MAX_NEW = 50;
+
+/** `dailyAutoAdd`：JST 日期、今天自動新增的件數、因為上限沒有加入的件數（popup 提示用）。 */
+export const dailyAutoAddSchema = z
+  .object({
+    date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/),
+    count: z.number().int().min(0).max(100_000),
+    skipped: z.number().int().min(0).max(100_000),
+  })
+  .strict();
+export type DailyAutoAdd = z.infer<typeof dailyAutoAddSchema>;
+
+/** `lastCart`：最近一次 cartSnapshot 讀到的作品（F15「從購物車選擇」）。 */
+export const lastCartSchema = z.object({ ids: z.array(workIdSchema).max(200), at: isoSchema }).strict();
+export type LastCart = z.infer<typeof lastCartSchema>;

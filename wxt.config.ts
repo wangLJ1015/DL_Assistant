@@ -1,6 +1,7 @@
 import { defineConfig } from 'wxt';
 import tailwindcss from '@tailwindcss/vite';
 import {
+  CONTENT_SCRIPT_EXCLUDE_MATCHES,
   CONTENT_SCRIPT_FILE,
   CONTENT_SCRIPT_MATCHES,
   DEV_MANIFEST_CSP,
@@ -8,6 +9,7 @@ import {
   MANIFEST_HOST_PERMISSIONS,
   MANIFEST_PERMISSIONS,
 } from './scripts/manifest-policy.ts';
+import { contentModulesPlugin } from './scripts/content-modules-plugin.ts';
 
 // §7.1 Manifest。CSP、權限的唯一來源是 scripts/manifest-policy.ts，check-manifest 用同一份比對輸出。
 export default defineConfig({
@@ -27,10 +29,10 @@ export default defineConfig({
     },
     externally_connectable: { ids: [], matches: [] },
     // content script 用 unlisted script 打包（理由見 src/entrypoints/dlsite-content.ts），在這裡註冊。
-    // exclude_matches（結帳、付款、帳號設定頁）在 M2 確認實際路徑後補上（§3.2.5）。
     content_scripts: [
       {
         matches: [...CONTENT_SCRIPT_MATCHES],
+        exclude_matches: [...CONTENT_SCRIPT_EXCLUDE_MATCHES],
         js: [CONTENT_SCRIPT_FILE],
         all_frames: false,
         run_at: 'document_idle',
@@ -41,6 +43,6 @@ export default defineConfig({
   // 開發時到 chrome://extensions 手動「載入未封裝項目」選 .output/chrome-mv3-dev。
   webExt: { disabled: true },
   vite: () => ({
-    plugins: [tailwindcss()],
+    plugins: [tailwindcss(), contentModulesPlugin()],
   }),
 });

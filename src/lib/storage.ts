@@ -4,7 +4,11 @@ import { browser } from 'wxt/browser';
 import { z } from 'zod';
 import { nowIso } from './dates';
 import {
+  dailyAutoAddSchema,
   defaultSettings,
+  lastCartSchema,
+  type DailyAutoAdd,
+  type LastCart,
   isoSchema,
   priceSnapshotSchema,
   settingsSchema,
@@ -18,6 +22,8 @@ export const STORAGE_KEYS = {
   settings: 'settings',
   items: 'items',
   snapshots: 'snapshots',
+  dailyAutoAdd: 'dailyAutoAdd',
+  lastCart: 'lastCart',
 } as const;
 
 /** storage 讀回的陣列逐筆驗證，失敗的丟棄；以作品編號為 key 放進 Map（§3.2.3）。 */
@@ -62,6 +68,19 @@ export async function readSnapshots(): Promise<Map<string, PriceSnapshot>> {
   return toValidatedMap(got[STORAGE_KEYS.snapshots], priceSnapshotSchema);
 }
 
+/** 今天（JST）的自動新增計數；日期不同或資料不符時從 0 開始。 */
+export async function readDailyAutoAdd(today: string): Promise<DailyAutoAdd> {
+  const got = await browser.storage.local.get(STORAGE_KEYS.dailyAutoAdd);
+  const r = dailyAutoAddSchema.safeParse(got[STORAGE_KEYS.dailyAutoAdd]);
+  return r.success && r.data.date === today ? r.data : { date: today, count: 0, skipped: 0 };
+}
+
+export async function readLastCart(): Promise<LastCart | undefined> {
+  const got = await browser.storage.local.get(STORAGE_KEYS.lastCart);
+  const r = lastCartSchema.safeParse(got[STORAGE_KEYS.lastCart]);
+  return r.success ? r.data : undefined;
+}
+
 // ---- 寫入（只在 background 使用）----
 
 /**
@@ -82,6 +101,8 @@ export interface StorePatch {
   settings?: Settings;
   items?: Map<string, TrackedItem>;
   snapshots?: Map<string, PriceSnapshot>;
+  dailyAutoAdd?: DailyAutoAdd;
+  lastCart?: LastCart;
 }
 
 /** 一次 set 寫入多個 key（§4.2 一批一次寫入）。Map 存成陣列。 */
@@ -90,6 +111,8 @@ export async function writeStore(patch: StorePatch): Promise<void> {
   if (patch.settings) out[STORAGE_KEYS.settings] = patch.settings;
   if (patch.items) out[STORAGE_KEYS.items] = [...patch.items.values()];
   if (patch.snapshots) out[STORAGE_KEYS.snapshots] = [...patch.snapshots.values()];
+  if (patch.dailyAutoAdd) out[STORAGE_KEYS.dailyAutoAdd] = patch.dailyAutoAdd;
+  if (patch.lastCart) out[STORAGE_KEYS.lastCart] = patch.lastCart;
   if (Object.keys(out).length > 0) await browser.storage.local.set(out);
 }
 
@@ -98,6 +121,7 @@ export async function writeStore(patch: StorePatch): Promise<void> {
 /** `storage.session` 的 key（session 預設只對受信任的環境開放）。 */
 export const SESSION_KEYS = {
   storageLock: 'storageLock',
+  seenDocuments: 'seenDocuments',
 } as const;
 
 const storageLockSchema = z.object({ ok: z.boolean(), at: isoSchema }).strict();

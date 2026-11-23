@@ -36,14 +36,14 @@
 | ~~zod 4~~ | ✅ M1：popup 與 background 跑完整的解析流程，沒有任何 CSP 違規或例外。v0.9：`verify:chrome` 改成只排除刻意觸發違規的區段（以發生先後判斷，不比對訊息內容）；改了之後抓到測試自己的 `*.css` 攔截規則擋掉了 popup 本身的樣式表，已修正 | M1 |
 | ~~fetch 與 User-Agent~~ | ✅ M1：在擴充功能頁面 fetch 時指定 `User-Agent`，實際送出的仍是瀏覽器的 UA（無法覆寫） | M1 |
 | ~~pnpm~~ | ✅ M1：固定 `pnpm@12.21.0`。`minimumReleaseAge`、`trustPolicy: no-downgrade`、`strictDepBuilds`、`allowBuilds` 都生效（`trustPolicy` 擋下了 puppeteer → `chromium-bidi` 的信任降級，因此不使用 puppeteer） | M1 |
-| content script 模組清單 | Vite plugin 的 `generateBundle` 在 WXT 的 content script 建置中能否取得 chunk 的 `modules`（§3.2.5） | M2 |
+| ~~content script 模組清單~~ | ✅ M2：WXT 的 unlisted script 建置中，Vite plugin 的 `generateBundle` 取得到 chunk 的 `modules`（含每個模組的 `renderedLength`），輸出 `.output/content-modules.json` | M2 |
 | ~~service worker 的 `location`~~ | ✅ M1：WXT 輸出的 background 裡 `globalThis instanceof ServiceWorkerGlobalScope` 為 true、`location.protocol` 是 `chrome-extension:` | M1 |
-| 作品編號 | ✅ 分站（M1，2026-11-23）：`maniax`、`home`、`books`、`pro`、`soft`、`girls`、`girls-pro`、`girls-drama`、`bl`、`bl-pro`、`bl-drama`、`appx` 的作品頁網址都留在 www.dlsite.com；`comic` 轉址到 `www.comipo.app`（排除）；`aix`、`ecchi-eng` 不是作品頁；分站名稱含連字號，§3.2.2 的路徑 regex 已放寬。`maniax` 路徑能開 `home` 的作品。**未確認**：`RJ`／`RE`／`BJ`／`VJ` 之外的前綴、手機版（`touch`）作品頁的網址格式 | M1 → M2 |
+| 作品編號 | ✅ 分站（M1，2026-11-23）：`maniax`、`home`、`books`、`pro`、`soft`、`girls`、`girls-pro`、`girls-drama`、`bl`、`bl-pro`、`bl-drama`、`appx` 的作品頁網址都留在 www.dlsite.com；`comic` 轉址到 `www.comipo.app`（排除）；`aix`、`ecchi-eng` 不是作品頁；分站名稱含連字號，§3.2.2 的路徑 regex 已放寬。`maniax` 路徑能開 `home` 的作品。**未確認**：`RJ`／`RE`／`BJ`／`VJ` 之外的前綴、手機版（`touch`）作品頁的網址格式（M2 只確認到列表頁有 `VJ` 作品；這兩項影響作品頁徽章，移到 M6） | M1 → M6 |
 | 擴充功能來源 | ✅ M1：以分頁開啟的 popup.html 送訊息時 `sender.origin` 是 `chrome-extension://<id>`、`sender.url` 以 `getURL('')` 開頭（帶 `tab`）。**未確認**：真正的 popup 視窗（headless 無法開啟）、`lookup.html`（M6 才有） | M1 → M6 |
 | ~~商品 API~~ | ✅ M1（2026-11-23）：最外層是以編號為 key 的物件；**全部編號都不存在時是 `[]`**；不存在的編號直接不出現（不是 `null`、也不會整批錯誤）；沒有打折時 `campaign_id`、`discount_rate`、`discount_end_date` 不出現；`%2C` 接受。另外：`product_id` 含 `__proto__` 時回 403 HTML（WAF），`assertAllowed` 不會送出這種請求；沒有圖的作品 `work_image` 是 `//www.dlsite.com/images/web/home/no_img_main.gif`（依 §3.2.2 換成預設圖）。`RJ99999999` 是 DLsite 的測試作品（「TestWork839」），不能當作「不存在的編號」測試 | M1 |
-| content script 排除路徑 | 結帳、付款、帳號設定頁與購物車頁的實際路徑，寫進 `exclude_matches` 與 `selectors.ts`；加入購物車的實際路徑，寫進打包掃描（§3.4） | M2 |
-| `onMessage` 非同步回應 | `return true`＋`sendResponse` 在 service worker 冷啟動時正常；`badgeInfo` 的實際回覆時間 | M2 |
-| `sender.url` | `history.pushState` 之後是否跟著改變（影響 `cartSnapshot` 的頁面檢查；每日上限仍有效） | M2 |
+| ~~content script 排除路徑~~ | ✅ M2（2026-11-23，未登入）：立即購買 `/<分站>/pay/member/=/relayout/cart/buynow/…`、マイページ `/<分站>/mypage/…`、登入 `/<分站>/login/…`、註冊 `/<分站>/regist/user`，寫進 `exclude_matches`；購物車頁 `/<分站>/cart/`（各分站共用），作品是 `ul.cart_list > li.cart_list_item[data-product-id]`（推薦區也有 `data-product_id`，不能用）；加入購物車：列表頁 `a.btn_cart[href="/<分站>/cart/=/product_id/<ID>.html"]`（GET）、作品頁 `button.btn_cart[data-ga4-ref="cart_add"]`（沒有 href，送 `POST /api/cart/<分站>/add`），寫進 `selectors.ts` 與打包掃描。`verify:m2` 確認排除的頁面沒有注入 content script。**未確認**：登入後才出現的帳號頁路徑 | M2 |
+| `onMessage` 非同步回應 | ✅ M2：用 `ServiceWorker.stopAllWorkers` 停掉 service worker 後，content script 的 `cartSnapshot` 會喚醒它並正常處理（`return true`＋`sendResponse`）。**未確認**：`badgeInfo` 的實際回覆時間（M6 才有徽章） | M2 → M6 |
+| ~~`sender.url`~~ | ✅ M2：頁面 `history.pushState` 到 `/home/cart/` 之後，content script 送的訊息 `sender.url` 仍是文件載入時的網址（不會改變），頁面無法讓 `cartSnapshot` 的頁面檢查誤判 | M2 |
 | service worker | 單純等待 fetch 回應是否算活動（不算就靠 §4.1 的進度寫回） | M3 |
 | DLWatcher 日期 | `start`／`end` 欄位的格式與時區（§5.2）；進行中的特價，`lowestPrice.priceInfo.end` 是未來的結束時間還是最後看到的時間（§3.6 合理性檢查） | M3 |
 | `storage.local.set` 多個 key | 一次寫入多個 key 是否不可分割（§4.2） | M4 |

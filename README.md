@@ -10,6 +10,7 @@ DLsite 購物車作品自動追蹤、史低查詢與優惠通知的 Chrome 擴�
 pnpm install --frozen-lockfile
 pnpm check:all       # lint、型別檢查、單元測試、正式建置、manifest 檢查
 pnpm verify:chrome   # 用本機 Chrome 實機驗證（先 pnpm build；臨時 profile，會呼叫一次 DLsite 商品 API）
+pnpm verify:m2       # M2：自動追蹤的實機驗證（先 pnpm build；DLsite 頁面全部是假的，不發出對外請求）
 pnpm dev             # 開發伺服器；到 chrome://extensions 載入 .output/chrome-mv3-dev
 ```
 

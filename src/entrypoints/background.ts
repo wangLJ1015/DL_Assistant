@@ -1,7 +1,8 @@
 import '../lib/zod-setup';
 import { browser } from 'wxt/browser';
 import { defineBackground } from 'wxt/utils/define-background';
-import { classifyMessage, type ContentMessage, type ExtMessage, type SenderLike, type WriteReply } from '../lib/messages';
+import { handleContentMessage } from '../lib/content-handlers';
+import { classifyMessage, type ExtMessage, type SenderLike, type WriteReply } from '../lib/messages';
 import { lockStorageToTrustedContexts } from '../lib/storage';
 import { refreshPrices, trackItem, untrackItem, updateSettings } from '../lib/tracking';
 
@@ -27,11 +28,6 @@ async function handleExt(msg: ExtMessage): Promise<Reply> {
   }
 }
 
-async function handleContent(_msg: ContentMessage): Promise<Reply> {
-  // content script 的訊息在 M2 起實作。
-  return { ok: false, reason: 'notImplemented' };
-}
-
 export default defineBackground(() => {
   // §4.2：每次 service worker 啟動都鎖住 storage.local，content script 不能直接讀寫。
   // 失敗時 lockStorageToTrustedContexts 會記錄並輸出錯誤，不會丟例外。
@@ -49,7 +45,7 @@ export default defineBackground(() => {
   browser.runtime.onMessage.addListener((raw: unknown, sender: SenderLike, sendResponse: (r: unknown) => void) => {
     const c = classifyMessage(raw, sender, browser.runtime.id, browser.runtime.getURL('/'));
     if (c.from === 'rejected') return false;
-    const job = c.from === 'ext' ? handleExt(c.msg) : handleContent(c.msg);
+    const job = c.from === 'ext' ? handleExt(c.msg) : handleContentMessage(c.msg, sender);
     job.then(sendResponse, () => sendResponse({ ok: false, reason: 'failed' }));
     // §3.2.4：非同步回覆一律 return true ＋ sendResponse()。
     return true;

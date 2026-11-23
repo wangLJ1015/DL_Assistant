@@ -1,8 +1,9 @@
 // §7.2 發佈前檢查：manifest 與打包結果。用 `node scripts/check-manifest.ts` 執行（Node 22.18+ 直接執行 TS）。
 // 只檢查正式建置（`wxt build`）；WXT 開發模式會放寬 CSP，不能拿去發佈。
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import {
+  CONTENT_SCRIPT_EXCLUDE_MATCHES,
   CONTENT_SCRIPT_FILE,
   CONTENT_SCRIPT_MATCHES,
   MANIFEST_CSP,
@@ -55,12 +56,13 @@ if (!ec || !sameList(ec.ids, []) || !sameList(ec.matches, []) || Object.keys(ec)
 }
 
 const cs = manifest.content_scripts as
-  { matches?: unknown; js?: unknown; css?: unknown; all_frames?: unknown; world?: unknown }[] | undefined;
+  { matches?: unknown; exclude_matches?: unknown; js?: unknown; css?: unknown; all_frames?: unknown; world?: unknown }[] | undefined;
 if (!Array.isArray(cs) || cs.length !== 1) {
   fail('exactly one content_scripts entry is expected');
 } else {
   const [c] = cs;
   if (!sameList(c!.matches, CONTENT_SCRIPT_MATCHES)) fail('content script matches differ');
+  if (!sameList(c!.exclude_matches, CONTENT_SCRIPT_EXCLUDE_MATCHES)) fail('content script exclude_matches differ (§3.2.5)');
   if (!sameList(c!.js, [CONTENT_SCRIPT_FILE])) fail(`content script must be ${CONTENT_SCRIPT_FILE}`);
   if (c!.css !== undefined) fail('content script must not load CSS files (§3.2.5)');
   if (c!.all_frames !== false) fail('content script must set all_frames: false');
@@ -88,6 +90,9 @@ for (const file of jsFiles) {
   if (/(^|[^.\w$])eval\s*\(/.test(text)) fail(`${rel}: contains eval(`);
   if (/mypage\/coupon(?!\/list\/ajax)/.test(text)) fail(`${rel}: contains /mypage/coupon (coupon issue endpoint)`);
   if (text.includes('/home/buy')) fail(`${rel}: contains /home/buy`);
+  // 加入購物車的實際路徑（§3.4 第 4 層，2026-11-23 實測）：列表頁的 GET 連結與作品頁按鈕的 POST。
+  // selectors.ts 的 regex 寫成 cart\/=\/product_id（跳脫的斜線），不會被這條掃到。
+  if (/\/cart\/=\/product_id|\/api\/cart\//.test(text)) fail(`${rel}: contains an add-to-cart path`);
   if (/localhost|127\.0\.0\.1/.test(text)) fail(`${rel}: contains localhost`);
   for (const m of text.matchAll(/https:\/\/([a-zA-Z0-9.-]+)/g)) {
     const host = m[1]!.toLowerCase();
@@ -112,11 +117,32 @@ if (!existsSync(contentPath)) {
     [/\bimport\s*\(/, 'dynamic import'],
     [/\.css\b/, 'CSS file reference'],
     // 樣式裡的 url() 等會以 DLsite 頁面的身分發出帶 cookie 的請求（§3.2.5）
-    [/url\s*\(|@import|image-set\s*\(/i, 'url( / @import / image-set('],
+    // CSS 的 url() 不分大小寫；JS 的 new URL(...) 不算
+    [/(?<!new\s+)url\s*\(|@import|image-set\s*\(/i, 'url( / @import / image-set('],
     [/setAttributeNode|createAttribute|insertRule|CSSStyleSheet|adoptedStyleSheets/, 'attribute node / stylesheet API'],
     [/\.on(message|click|error|load)\s*=/, 'on* event handler property'],
   ];
   for (const [re, name] of forbidden) if (re.test(text)) fail(`${CONTENT_SCRIPT_FILE}: contains ${name}`);
+}
+
+// content script 的模組清單（§3.2.5）：由 scripts/content-modules-plugin.ts 在建置時輸出，
+// 和 scripts/content-modules.baseline.json 比對，出現沒列過的套件就失敗。
+const modulesPath = join(dirname(OUT), 'content-modules.json');
+const contentPackages: string[] = [];
+if (!existsSync(modulesPath)) {
+  fail(`${relative(ROOT, modulesPath)} not found (content-modules plugin did not run)`);
+} else {
+  const report = JSON.parse(readFileSync(modulesPath, 'utf8')) as {
+    file?: string;
+    modules?: { id: string; pkg: string | null; bytes: number }[];
+  };
+  const baseline = JSON.parse(readFileSync(join(ROOT, 'scripts/content-modules.baseline.json'), 'utf8')) as { packages: string[] };
+  if (report.file !== CONTENT_SCRIPT_FILE || !Array.isArray(report.modules)) fail('content-modules.json is malformed');
+  for (const m of report.modules ?? []) {
+    if (m.pkg !== null && !contentPackages.includes(m.pkg)) contentPackages.push(m.pkg);
+    if (m.pkg !== null && !baseline.packages.includes(m.pkg))
+      fail(`${CONTENT_SCRIPT_FILE}: new package "${m.pkg}" (${m.id}); review it, then add it to scripts/content-modules.baseline.json`);
+  }
 }
 
 // 注入徽章的樣式（M6 才會出現；有的話檢查，§3.2.5）
@@ -131,4 +157,6 @@ if (errors.length > 0) {
   for (const e of errors) console.error(`  ✗ ${e}`);
   process.exit(1);
 }
-console.log(`check-manifest: OK (${jsFiles.length} js files, manifest ${relative(ROOT, manifestPath)})`);
+console.log(
+  `check-manifest: OK (${jsFiles.length} js files, manifest ${relative(ROOT, manifestPath)}, content script packages: ${contentPackages.join(', ') || 'none'})`,
+);
