@@ -206,6 +206,19 @@ async function main() {
         `document.querySelector('[data-work-id="${TEST_WORK}"] a')?.getAttribute('href') ?? ''`,
       )) as string;
       record('popup 手動加入作品後顯示現價（M1）', true, `${title.slice(0, 30)}… ${priceText}`);
+      const img = (await poll(
+        async () => {
+          const r = (await evaluate(
+            cdp,
+            pg,
+            `(() => { const i = document.querySelector('[data-work-id="${TEST_WORK}"] [data-testid="work-image"]'); return i && i.complete && i.naturalWidth > 0 ? { src: i.currentSrc, w: i.naturalWidth } : null; })()`,
+          )) as { src: string; w: number } | null;
+          return r ?? undefined;
+        },
+        15_000,
+        'work image',
+      ).catch(() => null)) as { src: string; w: number } | null;
+      record('popup 顯示作品圖片（img.dlsite.jp，WorkImage）', !!img && img.src.startsWith('https://img.dlsite.jp/'), JSON.stringify(img));
       record(
         '作品連結由 buildWorkUrl 組出',
         /^https:\/\/www\.dlsite\.com\/[a-z-]+\/work\/=\/product_id\/RJ01014447\.html$/.test(href),

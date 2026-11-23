@@ -47,7 +47,7 @@
 | service worker | 單純等待 fetch 回應是否算活動（不算就靠 §4.1 的進度寫回） | M3 |
 | DLWatcher 日期 | `start`／`end` 欄位的格式與時區（§5.2）；進行中的特價，`lowestPrice.priceInfo.end` 是未來的結束時間還是最後看到的時間（§3.6 合理性檢查） | M3 |
 | `storage.local.set` 多個 key | 一次寫入多個 key 是否不可分割（§4.2） | M4 |
-| DLsite 圖片 | `img.dlsite.jp` 是否檢查 Referer（會擋的話，擴充功能頁面改顯示預設圖） | M5 |
+| DLsite 圖片 | ✅（popup，Chrome 157）：擴充功能頁面以 `referrerPolicy="no-referrer"` 載入 `img.dlsite.jp` 的作品圖片成功（`verify:chrome`）。**未確認**：儀表板大量載入時是否被限流 | M5 |
 | 注入 UI 的樣式 | DLsite 頁面的 CSP 是否擋住 content script 插入 closed shadow root 的 `<style>`。被擋就改用 `new CSSStyleSheet()`＋`replaceSync()`，指派給 `shadowRoot.adoptedStyleSheets`（constructable stylesheet 不受頁面 CSP 的 `style-src` 限制）；要確認在 isolated world 建立的樣式表能否指派給頁面文件裡的 shadow root | M6 |
 | 右鍵選單 | `targetUrlPatterns` 實際能否比對含 `/=/` 的作品網址 | M6 |
 | 未登入時的優惠券 API | content script fetch 實際拿到 HTML、`opaqueredirect`、例外，還是 200 加 `[]`；登入但沒有券時是否回傳 `[]`；content script 的請求會不會經過 DLsite 頁面自己的 service worker | M7 |

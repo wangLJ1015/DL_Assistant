@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { browser } from 'wxt/browser';
 import { NavLink } from '../../components/NavLink';
+import { WorkImage } from '../../components/WorkImage';
 import { WorkLink } from '../../components/WorkLink';
 import { isWorkId } from '../../lib/ids';
 import type { ExtMessage, WriteReply } from '../../lib/messages';
@@ -172,7 +173,7 @@ export function App() {
   }, []);
 
   return (
-    <main className="p-3 text-sm text-gray-900">
+    <main className="w-[380px] p-3 text-sm text-gray-900">
       <h1 className="mb-2 text-base font-bold">DL_Assistant</h1>
       {lockFailed && (
         <p role="alert" className="mb-2 rounded bg-amber-100 px-2 py-1 text-amber-900">
@@ -216,30 +217,35 @@ export function App() {
       )}
       <ul className="mt-3 divide-y divide-gray-200" aria-label="追蹤清單">
         {data?.items.map((item) => (
-          <li key={item.id} className="py-2" data-work-id={item.id}>
-            <div className="flex items-start justify-between gap-2">
-              <WorkLink site={item.site} id={item.id} className="line-clamp-2 text-blue-700 hover:underline">
-                {item.title || item.id}
-              </WorkLink>
-              <span className="flex shrink-0 items-center gap-2">
-                {item.autoAdded && (
-                  <span className="rounded bg-gray-100 px-1 text-xs text-gray-600" data-testid="auto-added">
-                    {item.source === 'page' ? '從作品頁加入' : '自動加入'}
-                  </span>
-                )}
-                <button type="button" className="text-xs text-gray-500 hover:text-red-600" onClick={() => void remove(item.id)}>
-                  移除
-                </button>
-              </span>
-            </div>
-            <div className="mt-1" data-testid="price">
-              <PriceCell
-                item={item}
-                snap={data.snapshots.get(item.id)}
-                checking={checking.has(item.id)}
-                error={checkErrors.get(item.id)}
-                onRecheck={() => void recheck(item.id)}
-              />
+          <li key={item.id} className="flex gap-2 py-2" data-work-id={item.id}>
+            <WorkLink site={item.site} id={item.id} className="shrink-0">
+              <WorkImage url={item.imageUrl} className="h-[60px] w-20 rounded object-cover" />
+            </WorkLink>
+            <div className="min-w-0 flex-1">
+              <div className="flex items-start justify-between gap-2">
+                <WorkLink site={item.site} id={item.id} className="line-clamp-2 text-blue-700 hover:underline">
+                  {item.title || item.id}
+                </WorkLink>
+                <span className="flex shrink-0 items-center gap-2">
+                  {item.autoAdded && (
+                    <span className="rounded bg-gray-100 px-1 text-xs text-gray-600" data-testid="auto-added">
+                      {item.source === 'page' ? '從作品頁加入' : '自動加入'}
+                    </span>
+                  )}
+                  <button type="button" className="text-xs text-gray-500 hover:text-red-600" onClick={() => void remove(item.id)}>
+                    移除
+                  </button>
+                </span>
+              </div>
+              <div className="mt-1" data-testid="price">
+                <PriceCell
+                  item={item}
+                  snap={data.snapshots.get(item.id)}
+                  checking={checking.has(item.id)}
+                  error={checkErrors.get(item.id)}
+                  onRecheck={() => void recheck(item.id)}
+                />
+              </div>
             </div>
           </li>
         ))}

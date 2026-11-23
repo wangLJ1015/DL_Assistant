@@ -22,7 +22,7 @@ DLsite 頁面是已登入的狀態，DLWatcher 是第三方網站，優惠券說
 - **作品編號**：統一用 `lib/ids.ts` 的 `isWorkId(s) = /^(RJ|RE|BJ|VJ)(\d{6}|\d{8})$/.test(s)`（前綴清單見 §10.3）。不用沒有錨定的 regex 掃整段字串。
 - **作品頁連結**：只用 `https://www.dlsite.com/${site}/work/=/product_id/${id}.html` 組出。`site` 必須是列舉值（`maniax`、`home`、`books`、`pro`、`soft`、`girls`、`girls-pro`、`girls-drama`、`bl`、`bl-pro`、`bl-drama`、`appx`；2026-11-23 實測，§10.3），取 API 的 `site_id`，不在列舉內就用 `maniax`（實測 `maniax` 路徑也能開 `home` 的作品）；`id` 必須通過 `isWorkId()`。`comic` 會轉址到站外（`www.comipo.app`），**不列入**。
 - **從網址取作品編號**（F1、F13）：先 `new URL(url)`，要求 `protocol === 'https:'` 且 `host === 'www.dlsite.com'`，再用 `^/[a-z]+(-[a-z]+)?/(work|announce)/=/product_id/([A-Z]{2}\d{6,8})(\.html)?(/|$)` 比對 `pathname`，取出的編號再過 `isWorkId()`。其他網址一律不處理。（分站名稱可能含一個連字號，例如 `girls-pro`、`bl-drama`，M1 實測；手機版 `touch` 作品頁的網址格式仍待確認，見 §10.3。）
-- **圖片**：`//` 開頭的協定相對網址先補 `https:`（否則在擴充功能頁面會變成 `chrome-extension://img.dlsite.jp/...`），再用 `new URL()` 解析，要求 `origin === 'https://img.dlsite.jp'` 且 `username`、`password` 為空。不符的一律換成內建的預設圖。DLWatcher 和匯入檔案裡的圖片網址一律不用。
+- **圖片**：`//` 開頭的協定相對網址先補 `https:`（否則在擴充功能頁面會變成 `chrome-extension://img.dlsite.jp/...`），再用 `new URL()` 解析，要求 `origin === 'https://img.dlsite.jp'` 且 `username`、`password` 為空。不符的一律換成內建的預設圖。擴充功能頁面的圖片只能用 `components/WorkImage.tsx` 顯示：它在顯示前再跑一次 `normalizeImageUrl()`（storage 讀回的 `imageUrl` 只驗證長度），載入失敗也換成預設圖（inline SVG，不發請求），並設 `referrerPolicy="no-referrer"`。ESLint `react/forbid-elements` 在其他檔案禁止 `<img>`、`<picture>`、`<source>`、`<video>`、`<audio>`、`<image>`（v0.12）。DLWatcher 和匯入檔案裡的圖片網址一律不用。
 - **開啟網頁**（分頁、視窗、連結、通知點擊）的規則見 §3.4「導覽與資源載入」。
 - 擴充功能頁面的 CSP 在 MV3 預設值上再收緊（§7.1），讓瀏覽器擋住白名單以外的連線與圖片，作為 §3.4 的第二道防線。
 
@@ -164,7 +164,7 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
 - 這條規則用四層防線**降低機率**。四層都只檢查我們自己的原始碼，以及打包結果裡完整出現的字串；CSP 管不到導覽，所以**相依套件被植入惡意版本時仍能導覽到任何網址**（列在 §11 風險表）：
   1. **型別**：`lib/nav.ts` 匯出品牌型別 `type DlsiteNavUrl = string & { readonly __brand: 'DlsiteNavUrl' }`，只有 `buildWorkUrl()` 與 `nav.ts` 的常數能產生這個型別。`nav.ts` 的 `openTab(url: DlsiteNavUrl | ExtPageUrl)` 與 `openPopupWindow(...)` 是開分頁與視窗的唯一函式（`ExtPageUrl` 只能由 `chrome.runtime.getURL()` 組出的擴充功能頁面網址產生）。
   2. **元件**：擴充功能頁面一律用 `components/WorkLink.tsx`（參數是 `site`、`id`）與 `components/NavLink.tsx`（參數是 `nav.ts` 的常數名稱）產生連結，匯出下載用 `components/ExportButton.tsx`（§3.7）。只有這三個元件檔案例外：
-     - `react/forbid-elements` 禁止 `<a>`、`<area>`、`<form>`、`<meta>`、`<link>`、`<base>`、`<iframe>`、`<object>`、`<embed>`（`<meta http-equiv="refresh">` 以程式插入時也會導覽，CSP 擋不住）。
+     - `react/forbid-elements` 禁止 `<a>`、`<area>`、`<form>`、`<meta>`、`<link>`、`<base>`、`<iframe>`、`<object>`、`<embed>`（`<meta http-equiv="refresh">` 以程式插入時也會導覽，CSP 擋不住）。三個連結元件可以寫 `<a>`，但不能寫 `<img>`；`WorkImage` 可以寫 `<img>`，但不能寫連結（§3.2.2）。
      - `react/forbid-dom-props` 禁止 `href`、`action`、`formAction`、`httpEquiv`、`xlinkHref`、`ping`。
      - `react/jsx-props-no-spreading`（`html: 'enforce'`、`custom: 'ignore'`）禁止在 DOM 元素上展開 props（`forbid-dom-props` 看不到 `{...props}`）。
      - `no-restricted-imports` 禁止 import `react/jsx-runtime`、`react/jsx-dev-runtime`（直接呼叫 `jsx('a', { href })` 不會被 `forbid-elements` 認出）。
@@ -188,6 +188,7 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
   | `<button formAction="…">` | `react/forbid-dom-props` |
   | `import { jsx } from 'react/jsx-runtime'` | `no-restricted-imports` |
   | `React.createElement('a', …)` | `react/forbid-elements` |
+  | `WorkImage` 以外的 `<img src>` | `react/forbid-elements` |
   | `browser.tabs.create(…)`、`chrome.tabs.update(…)`、`navigation.navigate(…)`、`location.href = …`、`open(…)` | `no-restricted-syntax`／`no-restricted-globals` |
   | `const { tabs } = browser` | `no-restricted-syntax` |
   | `'https://…' as DlsiteNavUrl` | `no-restricted-syntax` |

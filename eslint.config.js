@@ -217,6 +217,17 @@ const CONTENT_ENTRY_IMPORT_REGEX = `^${CONTENT_IMPORT_BASE}`;
 
 const CONTENT_ENTRY = 'src/entrypoints/dlsite-content.ts';
 const CONTENT_FILES = [CONTENT_ENTRY, 'src/content/**/*.ts'];
+/** §3.4 第 2 層：連結與會導覽的元素只能寫在 LINK_COMPONENTS 裡。 */
+const FORBIDDEN_LINK_ELEMENTS = ['a', 'area', 'form', 'meta', 'link', 'base', 'iframe', 'object', 'embed'].map((element) => ({
+  element,
+  message: '§3.4：連結只能用 WorkLink／NavLink／ExportButton',
+}));
+/** §3.2.2：會載入外部資源的元素。作品圖片只能用 WorkImage（src 經過 normalizeImageUrl）。 */
+const FORBIDDEN_IMAGE_ELEMENTS = ['img', 'picture', 'source', 'video', 'audio', 'image'].map((element) => ({
+  element,
+  message: '§3.2.2：圖片只能用 WorkImage',
+}));
+const IMAGE_COMPONENT = 'src/components/WorkImage.tsx';
 const LINK_COMPONENTS = ['src/components/WorkLink.tsx', 'src/components/NavLink.tsx', 'src/components/ExportButton.tsx'];
 
 export default tseslint.config(
@@ -242,15 +253,7 @@ export default tseslint.config(
       'no-unsanitized/property': 'error',
       'react/no-danger': 'error',
       // §3.4 第 2 層
-      'react/forbid-elements': [
-        'error',
-        {
-          forbid: ['a', 'area', 'form', 'meta', 'link', 'base', 'iframe', 'object', 'embed'].map((element) => ({
-            element,
-            message: '§3.4：連結只能用 WorkLink／NavLink／ExportButton',
-          })),
-        },
-      ],
+      'react/forbid-elements': ['error', { forbid: [...FORBIDDEN_LINK_ELEMENTS, ...FORBIDDEN_IMAGE_ELEMENTS] }],
       'react/forbid-dom-props': [
         'error',
         {
@@ -268,10 +271,15 @@ export default tseslint.config(
       'no-restricted-properties': ['error', ...NET_PROPS, ...DATE_PROPS],
     },
   },
-  // 可以寫 <a href> 的三個元件（§3.4 第 2 層）
+  // 可以寫 <a href> 的三個元件（§3.4 第 2 層）；它們也不能寫 <img>
   {
     files: LINK_COMPONENTS,
-    rules: { 'react/forbid-elements': 'off', 'react/forbid-dom-props': 'off' },
+    rules: { 'react/forbid-elements': ['error', { forbid: FORBIDDEN_IMAGE_ELEMENTS }], 'react/forbid-dom-props': 'off' },
+  },
+  // 唯一可以寫 <img> 的元件（§3.2.2：src 一律經過 normalizeImageUrl）
+  {
+    files: [IMAGE_COMPONENT],
+    rules: { 'react/forbid-elements': ['error', { forbid: FORBIDDEN_LINK_ELEMENTS }] },
   },
   // 唯一可以導覽的檔案
   {

@@ -362,6 +362,17 @@ async function main() {
       labels.length >= 3 && labels.every((l) => l === '自動加入'),
       JSON.stringify(labels),
     );
+    // 商品 API 回 []（查不到），沒有圖片網址：每一列都是內建的預設圖，不發任何圖片請求
+    const images = (await evaluate(
+      cdp,
+      ext,
+      `({ placeholders: document.querySelectorAll('[data-testid="work-image-placeholder"]').length, imgs: document.querySelectorAll('img').length, rows: document.querySelectorAll('[data-work-id]').length })`,
+    )) as { placeholders: number; imgs: number; rows: number };
+    record(
+      '沒有圖片網址的作品顯示內建的預設圖（§3.2.2）',
+      images.rows > 0 && images.placeholders === images.rows && images.imgs === 0,
+      JSON.stringify(images),
+    );
 
     record(
       '沒有需要擋下的對外請求（DLsite 頁面與商品 API 全部由 CDP 回應）',
