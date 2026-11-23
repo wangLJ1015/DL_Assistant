@@ -149,20 +149,24 @@ GET https://www.dlsite.com/maniax/product/info/ajax?product_id=RJ001,RJ002,...&c
 GET https://www.dlsite.com/home/mypage/coupon/list/ajax
 ```
 - 優惠券管理頁面（`/home/mypage/coupon/list`）就是呼叫這支 API 拿資料，回傳持有券的陣列。用已登入的瀏覽器以同源請求呼叫即可，不用解析 HTML。
+- ⚠️ 回應內容是 JSON，但 `Content-Type` 是 `text/html`。程式要用 `response.text()` 再 `JSON.parse`，**不能**用 Content-Type 判斷。未登入時會被導向 `login.dlsite.com`，回傳登入頁的 HTML，`JSON.parse` 失敗就當作「未登入」。
 - 一次回傳全部樓層、包含 R18 的券（實測 6 張全部回傳），頁面上的樓層篩選只是前端過濾。
 - 會用到的欄位：
 
 | 欄位 | 範例 | 說明 |
 |---|---|---|
 | `coupon_id` / `coupon_name` | `dojin_30peroff_20261116` | 識別碼與名稱 |
-| `discount_type` / `discount` | `rate` / `"30"` | 折扣方式與數值（字串，要轉數字） |
-| `is_multiple_use` | true | 期間內可以重複使用 |
+| `discount_type` / `discount` | `rate` / `"30"`，`price` / `"400"` | 折扣方式與數值（字串，要轉數字） |
+| `is_multiple_use` | true / false | true：期間內可以重複使用；false：每人限用一次 |
+| `is_affect_to_payment` | true | 折抵整筆結帳金額（定額券實測為 true） |
+| `limit_date` | 1796227116 | **實際到期時間**（Unix 秒）。定額券是領券後 10 天，比 `end_date` 早 |
+| `encrypted_code` | 一串編碼 | 不需要，**不儲存** |
 | `limited_usage_count` / `limited_usage_limit` | null | 有次數限制的券才有值 |
-| `condition_type` | `custom_genre` 或 `site_ids` | 適用範圍的判斷方式 |
+| `condition_type` | `custom_genre`、`site_ids` 或 `payment` | 適用範圍的判斷方式。`payment` 是整筆結帳折抵 |
 | `conditions.custom_genre` | `["20261116coupon30"]` | 對應作品的 `custom_genres` |
 | `conditions.site_ids` | `["home", "maniax", ...]` | 對應作品的 `site_id`（含 `touch` 版） |
 | `conditions.maximum_applicable_price` | `"2749"` | 單價上限，超過就不適用 |
-| `conditions.price_sum` | 0 | 金額門檻 |
+| `conditions.price_sum` | `0` 或 `[1200]` | 金額門檻。型別不固定，數字或陣列都要接受 |
 | `conditions.post_condition` | `{ "count": 3, "price": 1 }` | 至少買 3 件適用作品（`price` 的意思待確認） |
 | `condition_info` | HTML 文字 | 使用條件說明，例如「割引中の作品にも適用出来ます」 |
 | `start_date` / `end_date` | `2026-11-28 23:59:59` | 有效期間（日本時間） |
@@ -239,20 +243,22 @@ interface PriceLogEntry {
 interface Coupon {
   id: string;                    // coupon_id，例："dojin_30peroff_20261116"
   name: string;                  // coupon_name
-  kind: 'rate' | 'fixed';        // discount_type（目前只看過 "rate"；定額券的值待確認）
-  value: number;                 // discount，例：30（%）
-  multiUse: boolean;             // is_multiple_use：有效期間內可以重複使用（實測 6 張全是 true）
+  kind: 'rate' | 'price';        // discount_type：折扣率 "rate"／定額 "price"（兩種都已實測）
+  value: number;                 // discount，例：30（%）或 400（日圓）
+  multiUse: boolean;             // is_multiple_use：false 代表每人只能用一次（實測定額券是 false）
   usage?: { used: number; limit: number };   // limited_usage_count / limited_usage_limit
   eligibility:
     | { type: 'custom_genre'; genres: string[] }   // 作品的 custom_genres 有交集才適用
-    | { type: 'site_ids'; siteIds: string[] };     // 作品的 site_id 在清單內才適用
+    | { type: 'site_ids'; siteIds: string[] }      // 作品的 site_id 在清單內才適用
+    | { type: 'payment'; siteIds: string[] };      // 整筆結帳折抵：distribute_targets 樓層內的作品都算
+  affectsPayment: boolean;       // is_affect_to_payment：true 代表折抵整筆結帳金額，而不是逐件打折
   maxItemPrice?: number;         // conditions.maximum_applicable_price：單價超過就不適用（同人樓層，例：2749）
-  minSpend?: number;             // conditions.price_sum：使用門檻（0 代表沒有）
+  minSpend?: number;             // conditions.price_sum：使用門檻。實測可能是數字 0 或陣列 [1200]，兩種都要處理
   minItems?: number;             // conditions.post_condition.count：至少一起買幾件適用作品
   appliesToDiscounted: boolean | null;  // 從 condition_info 文字判斷：「割引中の作品にも適用」→ true；沒寫 → null（未知）
   floors: { doujin: boolean; books: boolean; pc: boolean; app: boolean; ai: boolean; female: boolean; adult: boolean };
   startsAt: string;              // start_date（日本時間）
-  expiresAt: string;             // end_date（日本時間）
+  expiresAt: string;             // limit_date（Unix 秒）才是這張券對你的實際到期時間；end_date 是活動結束日，不一定相同
   conditionText: string;         // condition_info 去掉 HTML 後的原文，顯示給使用者核對
   syncedAt: string;
 }
@@ -419,12 +425,33 @@ DL_Assistant/
 |---|---|---|---|
 | a | 「單價上限 2,749 円」是**超過就整件不適用**，還是**只算到 2,749 円**為止 | 超過就不適用 | 把一件 3,000 円以上的同人作品放進購物車，看 15% 券的折扣金額 |
 | b | 沒寫「割引中にも適用」的券，能不能用在打折中的作品 | 未知，標示警告 | 購物車選券時看折扣有沒有算進去 |
-| c | `price_sum`（金額門檻）看的是適用作品小計還是整單 | 適用作品小計 | 目前持有的券門檻都是 0，等有門檻的券再驗證 |
+| c | `price_sum`（金額門檻）看的是適用作品小計還是整單 | `payment` 型：整單（定額券說明寫「此優惠券可用於所有作品」）；其他型：適用作品小計 | 折扣率券目前門檻都是 0，等有門檻的折扣率券再驗證 |
 | d | `post_condition.price: 1` 的意思 | 忽略 | 等有不同數值的券再比對 |
-| e | 定額券的 `discount_type` 值 | 當作 `"price"` | 等拿到定額券再確認 |
+| ~~e~~ | ~~定額券的 `discount_type` 值~~ | ✅ 已確認是 `"price"`（見下方） | |
+| g | 定額券在同一單裡怎麼分攤到各作品 | 整單折抵，不逐件分攤 | 只影響點數回饋的計算，預設不比點數，所以優先度低 |
 | f | 商品 API 的 `is_noreduction` 是不是「不能用券」 | 是 | 找一件 `is_noreduction: true` 的作品放進購物車確認 |
 
 > 驗證時只需要把作品放進購物車、在「購入内容の確認」頁選券看金額，**不用真的結帳**。
+
+**定額券實例（優惠券 API 實測，2026-11-23）**
+
+| 欄位 | 值 | 說明 |
+|---|---|---|
+| `coupon_id` | `ovs_out_100p_silveryellow_202610` | 也是頁面上 `.coupon_list_item` 的 DOM id |
+| `coupon_name` | 【黃遊宅之道獨家優惠】400日圓 折抵優惠券 | 合作網站發的券 |
+| `discount_type` / `discount` | `price` / `"400"` | 定額折抵 400 日圓 |
+| `condition_type` | `payment` | 整筆結帳折抵，說明寫「此優惠券可用於所有作品」 |
+| `conditions.price_sum` | `[1200]` | 滿 1,200 日圓才能用（**陣列**，折扣率券是數字 0） |
+| `is_multiple_use` | false | 說明寫「每位會員僅限使用一次」 |
+| `is_affect_to_payment` | true | 折抵的是結帳總額 |
+| `distribute_targets` | 同人、女性向、漫畫、遊戲、手機遊戲、AI 生成等 15 個樓層 | 這些樓層的作品都適用 |
+| `end_date` / `limit_date` | 2026-12-31 / 2026-12-03 00:58:36（JST） | 實際到期以 `limit_date` 為準（領券後 10 天），頁面上顯示的也是這個 |
+
+對設計的影響：
+- 一次性的券確實存在，§12.2 第 3 步「限次券」那層 DP 是必要的，不能省。
+- `payment` 型的券：門檻看整筆訂單小計，折抵 `min(面額, 小計)`。所以不適用其他券的作品也可以放進這一單，幫忙湊滿 1,200。演算法在算 `save(c, S)` 時要用整單小計，不是適用小計。
+- 到期時間一律讀 `limit_date`。如果用 `end_date`，這張券會被當成多活 28 天，到期提醒就會錯。
+- 頁面 HTML 只有顯示用的文字，**解析一律用 §5.4 的 JSON API**，HTML 只當作 API 失效時的備援。
 
 ---
 
@@ -463,6 +490,7 @@ DLsite 是數位商品，沒有運費，所以多分幾單不會多花錢。這�
    - 找出 `S` 裡適用 `c` 的作品：符合 `custom_genre` 或 `site_ids` 條件、單價沒超過 `maxItemPrice`、不是 `noReduction`；打折中的作品，`appliesToDiscounted` 為 false 時排除，為 null 時依設定（預設排除並標示警告）
    - 適用作品的件數少於 `minItems`，或小計沒達到 `minSpend` → 0
    - 折扣率券 → `Σ floor(現價ᵢ × 折扣率)`（逐件捨去，官方已確認）；定額券 → `min(面額, 適用小計)`
+   - `payment` 型的券（實測的定額券就是這種）：門檻和折抵都看 `S` 的**整單小計**，所以不適用其他券的作品放進這一單也能幫忙湊門檻
    - 單一訂單的最佳節省：`best(S) = max_c save(c, S)`
 2. **只有可重複使用的券時（目前的實際情況）**：問題變成「把作品分組，每組挑最好的一張券」。
    `g[mask] = max_{sub ⊆ mask，sub 含 mask 的最低位} ( best(sub) + g[mask \ sub] )`
