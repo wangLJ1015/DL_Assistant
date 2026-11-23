@@ -1,0 +1,2 @@
+# Prettier 與 CI 都用 LF；不讓 core.autocrlf 在 Windows checkout 時轉成 CRLF。
+* text=auto eol=lf
