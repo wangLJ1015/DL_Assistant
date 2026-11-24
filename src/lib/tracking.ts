@@ -1,14 +1,16 @@
 // 追蹤清單的加入／移除與查價（background 專用）。
-// 查價本身排進 §4.1 的佇列（queue.ts），請求與寫入在 price-check.ts。通知規則（§6.1）在 M4。
+// 查價本身排進 §4.1 的佇列（queue.ts），請求、寫入與通知規則（§6.1）在 price-check.ts。
 import { isoToMs, nowIso } from './dates';
 import { isWorkId } from './ids';
-import { MAX_TRACKED_ITEMS, type Settings, type TrackedItem } from './models';
+import { MAX_TRACKED_ITEMS, WORK_RULES, type Settings, type TrackedItem } from './models';
 import type { WriteReply } from './messages';
 import { enqueueDlwatcher, kick, rescheduleCheck, requestChecks } from './queue';
+import { ruleStateKey, targetStateFor } from './rules';
 import {
   RECHECK_COOLDOWN_MS,
   readItems,
   readRecheckAt,
+  readRuleState,
   readSettings,
   readSnapshots,
   readUntracked,
@@ -67,14 +69,54 @@ export function checkNewItems(ids: readonly string[]): void {
 
 export async function untrackItem(id: string): Promise<WriteReply> {
   return writeQueue(async () => {
-    const [items, snapshots, untracked] = await Promise.all([readItems(), readSnapshots(), readUntracked()]);
+    const [items, snapshots, untracked, ruleState] = await Promise.all([readItems(), readSnapshots(), readUntracked(), readRuleState()]);
     if (!items.delete(id)) return { ok: true };
-    // §4.2 清理：快照刪掉；priceLog 與 DLWatcher 的歷史保留（重新追蹤時還能用）。
+    // §4.2 清理：快照與 RuleState 刪掉；priceLog 與 DLWatcher 的歷史保留（重新追蹤時還能用）。
     snapshots.delete(id);
+    for (const rule of WORK_RULES) ruleState.delete(ruleStateKey('work', id, rule));
     // 移除紀錄：購物車頁同步不會再把它加回來（§5.3 untracked）
     untracked.delete(id);
     untracked.set(id, nowIso());
-    await writeStore({ items, snapshots, untracked });
+    await writeStore({ items, snapshots, untracked, ruleState });
+    return { ok: true };
+  });
+}
+
+/**
+ * `setPaused {id, paused}`（F3）：暫停 = 不查價、不通知（§5.3）。恢復時清掉 baselineAt，
+ * 下一次查價重新建立基準、不發通知（§6.1 第 6 步），並馬上排一次查價。
+ */
+export async function setPaused(id: string, paused: boolean): Promise<WriteReply> {
+  const r = await writeQueue(async (): Promise<WriteReply & { resumed?: boolean }> => {
+    const items = await readItems();
+    const item = items.get(id);
+    if (!item) return { ok: false, reason: 'notTracked' };
+    if (item.paused === paused) return { ok: true };
+    const { baselineAt: _, ...rest } = item;
+    items.set(id, paused ? { ...item, paused: true } : { ...rest, paused: false });
+    await writeStore({ items });
+    return { ok: true, resumed: !paused };
+  });
+  if (r.ok && r.resumed) void requestChecks([id], { dlwatcher: true }).catch(() => undefined);
+  return r.ok ? { ok: true } : r;
+}
+
+/**
+ * `setTarget {id, price?}`（§3.2.4、§6）：設定或清掉目標價，並用目前的快照重算 `target` 的狀態：
+ * 已經低於目標價就記成成立、不通知（剛設定就知道了）。
+ */
+export async function setTarget(id: string, price: number | undefined): Promise<WriteReply> {
+  return writeQueue(async () => {
+    const [items, snapshots, ruleState] = await Promise.all([readItems(), readSnapshots(), readRuleState()]);
+    const item = items.get(id);
+    if (!item) return { ok: false, reason: 'notTracked' };
+    const { targetPrice: _, ...rest } = item;
+    items.set(id, price === undefined ? rest : { ...rest, targetPrice: price });
+    const key = ruleStateKey('work', id, 'target');
+    const st = targetStateFor(snapshots.get(id), price, ruleState.get(key), nowIso());
+    if (st) ruleState.set(key, st);
+    else ruleState.delete(key);
+    await writeStore({ items, ruleState });
     return { ok: true };
   });
 }

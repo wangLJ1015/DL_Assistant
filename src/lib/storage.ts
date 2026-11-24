@@ -23,6 +23,17 @@ import {
   type PriceSnapshot,
   type Settings,
   type TrackedItem,
+  NOTIFIED_MAX,
+  NOTIFIED_TTL_MS,
+  RECENT_NOTIFICATIONS_MAX,
+  RULE_STATE_KEY_MAX,
+  RULE_STATE_MAX,
+  WORK_RULES,
+  notifiedKeySchema,
+  recentNotificationSchema,
+  ruleStateSchema,
+  type RecentNotification,
+  type RuleState,
 } from './models';
 
 export const STORAGE_KEYS = {
@@ -38,6 +49,9 @@ export const STORAGE_KEYS = {
   dlwatcherHealth: 'dlwatcherHealth',
   dlwatcherLastRequest: 'dlwatcherLastRequest',
   recheckAt: 'recheckAt',
+  ruleState: 'ruleState',
+  notified: 'notified',
+  recentNotifications: 'recentNotifications',
 } as const;
 
 /** storage 讀回的陣列逐筆驗證，失敗的丟棄；以作品編號為 key 放進 Map（§3.2.3）。 */
@@ -164,6 +178,72 @@ function pruneIdTimes(m: Map<string, string>, ttlMs: number): [string, string][]
   return [...m.entries()].filter(([, at]) => now - isoToMs(at) < ttlMs).slice(-2000);
 }
 
+// ---- 通知（§5.3、§6）----
+
+/**
+ * `ruleState` 的 key 是否為 JSON.stringify([對象種類, 對象編號, rule])：作品是 ['work', 作品編號, 作品的規則]，
+ * 券是 ['coupon', coupon.key, 'couponExpiring']。
+ */
+export function isRuleStateKey(key: string): boolean {
+  if (key.length > RULE_STATE_KEY_MAX) return false;
+  let v: unknown;
+  try {
+    v = JSON.parse(key);
+  } catch {
+    return false;
+  }
+  if (!Array.isArray(v) || v.length !== 3 || JSON.stringify(v) !== key) return false;
+  const [kind, id, rule] = v as unknown[];
+  if (kind === 'work') return workIdSchema.safeParse(id).success && (WORK_RULES as readonly unknown[]).includes(rule);
+  if (kind === 'coupon') return typeof id === 'string' && id.length > 0 && id.length <= 300 && rule === 'couponExpiring';
+  return false;
+}
+
+/** 規則的上次判定結果。逐筆驗證，不符的丟棄；超過上限時留最新的（Map 新加入的在後面，v0.16）。 */
+export async function readRuleState(): Promise<Map<string, RuleState>> {
+  const got = await browser.storage.local.get(STORAGE_KEYS.ruleState);
+  const raw: unknown = got[STORAGE_KEYS.ruleState];
+  const out = new Map<string, RuleState>();
+  if (!Array.isArray(raw)) return out;
+  for (const v of raw.slice(-RULE_STATE_MAX)) {
+    if (!Array.isArray(v) || v.length !== 2 || typeof v[0] !== 'string' || !isRuleStateKey(v[0])) continue;
+    const r = ruleStateSchema.safeParse(v[1]);
+    if (r.success) out.set(v[0], r.data);
+  }
+  return out;
+}
+
+/** 已送出的通知的去重 key → 送出時間。 */
+export async function readNotified(): Promise<Map<string, string>> {
+  const got = await browser.storage.local.get(STORAGE_KEYS.notified);
+  const raw: unknown = got[STORAGE_KEYS.notified];
+  const out = new Map<string, string>();
+  if (!Array.isArray(raw)) return out;
+  for (const v of raw.slice(-NOTIFIED_MAX)) {
+    const r = notifiedKeySchema.safeParse(v);
+    if (r.success) out.set(r.data.key, r.data.at);
+  }
+  return out;
+}
+
+/** 最近的通知，新的在前（最多 50 則）。 */
+export async function readRecentNotifications(): Promise<RecentNotification[]> {
+  const got = await browser.storage.local.get(STORAGE_KEYS.recentNotifications);
+  const raw: unknown = got[STORAGE_KEYS.recentNotifications];
+  if (!Array.isArray(raw)) return [];
+  const out: RecentNotification[] = [];
+  for (const v of raw.slice(0, RECENT_NOTIFICATIONS_MAX)) {
+    const r = recentNotificationSchema.safeParse(v);
+    if (r.success) out.push(r.data);
+  }
+  return out;
+}
+
+/** §6.1：`notified` 超過 180 天的紀錄刪掉（每次排程時呼叫）。 */
+export function pruneNotified(m: Map<string, string>, nowMs: number): Map<string, string> {
+  return new Map([...m.entries()].filter(([, at]) => nowMs - isoToMs(at) < NOTIFIED_TTL_MS));
+}
+
 // ---- 寫入（只在 background 使用）----
 
 /**
@@ -193,6 +273,9 @@ export interface StorePatch {
   dlwatcherHealth?: DlwatcherHealth;
   dlwatcherLastRequest?: Map<string, string>;
   recheckAt?: Map<string, string>;
+  ruleState?: Map<string, RuleState>;
+  notified?: Map<string, string>;
+  recentNotifications?: RecentNotification[];
 }
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -213,6 +296,9 @@ export async function writeStore(patch: StorePatch): Promise<void> {
   if (patch.dlwatcherHealth) out[STORAGE_KEYS.dlwatcherHealth] = patch.dlwatcherHealth;
   if (patch.dlwatcherLastRequest) out[STORAGE_KEYS.dlwatcherLastRequest] = pruneIdTimes(patch.dlwatcherLastRequest, DAY_MS);
   if (patch.recheckAt) out[STORAGE_KEYS.recheckAt] = pruneIdTimes(patch.recheckAt, RECHECK_COOLDOWN_MS);
+  if (patch.ruleState) out[STORAGE_KEYS.ruleState] = [...patch.ruleState.entries()].slice(-RULE_STATE_MAX);
+  if (patch.notified) out[STORAGE_KEYS.notified] = [...patch.notified.entries()].slice(-NOTIFIED_MAX).map(([key, at]) => ({ key, at }));
+  if (patch.recentNotifications) out[STORAGE_KEYS.recentNotifications] = patch.recentNotifications.slice(0, RECENT_NOTIFICATIONS_MAX);
   if (Object.keys(out).length > 0) await browser.storage.local.set(out);
 }
 

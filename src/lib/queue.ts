@@ -5,7 +5,16 @@
 import { browser } from 'wxt/browser';
 import { isoToMs, msToIso, nowIso } from './dates';
 import { isDlwatcherActive } from './history';
-import { QUEUE_MAX_IDS, type BackoffEntry, type QueueSource, type Queues, type Settings, type SourceQueue } from './models';
+import {
+  QUEUE_MAX_IDS,
+  type BackoffEntry,
+  type QueueSource,
+  type Queues,
+  type RecentNotification,
+  type Settings,
+  type SourceQueue,
+} from './models';
+import { DLWATCHER_PAUSED_NOTICE, newNotificationId, showNotification, toRecent } from './notify';
 import { checkDlwatcherItem, checkProductBatch, type DlwatcherOutcome, type IdOutcome, type ProductBatchResult } from './price-check';
 import {
   readBackoff,
@@ -13,8 +22,11 @@ import {
   readDlwatcherLastRequest,
   readItems,
   readLastRunAt,
+  readNotified,
   readQueues,
+  readRecentNotifications,
   readSettings,
+  pruneNotified,
   writeQueue,
   writeStore,
 } from './storage';
@@ -295,7 +307,7 @@ async function stepDlwatcher(): Promise<void> {
 async function recordDlwatcherResult(id: string, r: DlwatcherOutcome | { kind: 'error' }, sentAt: string): Promise<void> {
   const advance = r.kind !== 'retry' && r.kind !== 'network';
   if (advance) await finishStep('dlwatcher', [id], r.kind === 'saved' ? 'ok' : r.kind === 'error' ? 'skipped' : 'responded');
-  await writeQueue(async () => {
+  const pausedNotice = await writeQueue(async (): Promise<string | undefined> => {
     const [lastRequest, health, settings, queues, backoff] = await Promise.all([
       readDlwatcherLastRequest(),
       readDlwatcherHealth(),
@@ -313,6 +325,8 @@ async function recordDlwatcherResult(id: string, r: DlwatcherOutcome | { kind: '
       r.kind === 'rejected' || r.kind === 'retry' || (r.kind === 'network' && backoff.productInfo.networkFailures === undefined);
     let nextHealth = health;
     let nextSettings: Settings | undefined;
+    let recent: RecentNotification[] | undefined;
+    let noticeId: string | undefined;
     if (r.kind === 'saved') {
       if (health.allFailingSince || health.lastFailureAt) nextHealth = {};
     } else if (failed) {
@@ -323,14 +337,20 @@ async function recordDlwatcherResult(id: string, r: DlwatcherOutcome | { kind: '
         nextSettings = { ...settings, dlwatcherAutoPausedAt: now };
         queues.dlwatcher = { ids: [], nextIndex: 0, ...(queues.dlwatcher.nextAt ? { nextAt: queues.dlwatcher.nextAt } : {}) };
         console.warn('[DL_Assistant] DLWatcher 連續 7 天都失敗，已自動暫停（§3.6）');
+        // §3.6：系統通知（和設定同一次寫入，寫完才送，§4.2）
+        noticeId = newNotificationId();
+        recent = [toRecent(noticeId, DLWATCHER_PAUSED_NOTICE, [], now), ...(await readRecentNotifications())];
       }
     }
     await writeStore({
       ...(advance ? { dlwatcherLastRequest: lastRequest } : {}),
       ...(nextHealth !== health ? { dlwatcherHealth: nextHealth } : {}),
       ...(nextSettings ? { settings: nextSettings, queues } : {}),
+      ...(recent ? { recentNotifications: recent } : {}),
     });
+    return noticeId;
   });
+  if (pausedNotice) await showNotification(pausedNotice, DLWATCHER_PAUSED_NOTICE);
 }
 
 // ---- drain：依序處理兩條佇列 ----
@@ -450,7 +470,12 @@ export async function enqueueDlwatcher(ids: readonly string[], opts: { front?: b
 export async function startRun(): Promise<void> {
   const items = await readItems();
   const ids = [...items.values()].filter((i) => !i.paused).map((i) => i.id);
-  await writeQueue(() => writeStore({ lastRunAt: nowIso() }));
+  // §6.1：notified 超過 180 天的紀錄在每次排程時刪除。
+  await writeQueue(async () => {
+    const notified = await readNotified();
+    const pruned = pruneNotified(notified, Date.now());
+    await writeStore({ lastRunAt: nowIso(), ...(pruned.size !== notified.size ? { notified: pruned } : {}) });
+  });
   await enqueue('productInfo', ids);
   await enqueueDlwatcher(ids);
   void kick();

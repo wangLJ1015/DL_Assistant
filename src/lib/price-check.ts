@@ -2,11 +2,24 @@
 import { apiGet } from './api/endpoints';
 import { applyProductInfo, parseProductInfoResponse, toSnapshot, unavailableSnapshot, type ProductInfo } from './api/dlsite';
 import { checkDlwatcherSanity, isDivergent, parseDlwatcherResponse, toHistoryRecord, type SanityFailure } from './api/dlwatcher';
-import { appendPriceObservations, readHistory, readPriceLog, writeHistory } from './db';
+import { appendPriceObservations, readHistories, readHistory, readPriceLog, readPriceLogs, writeHistory } from './db';
 import { nowIso } from './dates';
-import { MAX_NOT_FOUND_COUNT, type TrackedItem } from './models';
+import { isDlwatcherActive } from './history';
+import { MAX_NOT_FOUND_COUNT, type HistoryRecord, type TrackedItem } from './models';
+import { buildWorkNotice, newNotificationId, showNotification, toRecent, type NoticeContent, type NoticeWork } from './notify';
 import { observationFromSnapshot, priceLogGapMs, type PriceObservation } from './price-log';
-import { readItems, readSettings, readSnapshots, writeQueue, writeStore } from './storage';
+import { evaluateWork } from './rules';
+import {
+  readItems,
+  readNotified,
+  readRecentNotifications,
+  readRuleState,
+  readSettings,
+  readSnapshots,
+  writeQueue,
+  writeStore,
+  type StorePatch,
+} from './storage';
 
 /** 一件作品這次查價的結果。 */
 export type IdOutcome = { status: 'found' | 'missing' | 'invalid' } | { status: 'failed'; reason: string };
@@ -102,13 +115,28 @@ async function writeProductResults(
   invalidIds: ReadonlySet<string>,
 ): Promise<Map<string, IdOutcome>> {
   const checkedAt = nowIso();
-  return writeQueue(async () => {
-    const [items, snapshots, settings] = await Promise.all([readItems(), readSnapshots(), readSettings()]);
+  const { outcomes, notice } = await writeQueue(async () => {
+    const [items, snapshots, settings, ruleState, notified, recent] = await Promise.all([
+      readItems(),
+      readSnapshots(),
+      readSettings(),
+      readRuleState(),
+      readNotified(),
+      readRecentNotifications(),
+    ]);
     const outcomes = new Map<string, IdOutcome>();
     const observations: PriceObservation[] = [];
+    const noticeWorks: NoticeWork[] = [];
+    // §6.1 第 4 步要用這次寫入之前的紀錄：一批一起讀（一個 transaction）。
+    const targets = batch.filter((id) => items.get(id)?.paused === false && !invalidIds.has(id));
+    const dlwActive = isDlwatcherActive(settings);
+    const [logs, histories] = await Promise.all([
+      readPriceLogs(targets),
+      dlwActive ? readHistories(targets) : new Map<string, HistoryRecord>(),
+    ]);
     for (const id of batch) {
       const item = items.get(id);
-      if (!item) continue; // 查價途中被移除
+      if (!item || item.paused) continue; // 查價途中被移除或暫停（暫停 = 不查價、不通知）
       // §3.2.3：驗證失敗只讓這一筆失敗，不當成「查不到」，快照維持原樣。
       if (invalidIds.has(id)) {
         outcomes.set(id, { status: 'invalid' });
@@ -117,18 +145,64 @@ async function writeProductResults(
       const info = found.get(id);
       const prev = snapshots.get(id);
       const snap = info ? toSnapshot(info, prev, checkedAt) : unavailableSnapshot(prev, checkedAt);
-      items.set(id, withNotFoundCount(info ? applyProductInfo(item, info) : item, !snap?.available));
-      // §5.3：第一次查價就查不到時沒有可沿用的資料，不寫快照與 priceLog。
+      let next = withNotFoundCount(info ? applyProductInfo(item, info) : item, !snap?.available);
+      // §5.3：第一次查價就查不到時沒有可沿用的資料，不寫快照與 priceLog（也還不建立通知的基準）。
       if (snap) {
-        snapshots.set(id, snap);
-        observations.push(observationFromSnapshot(snap));
+        // §6.1 第 2～8 步
+        const ev = evaluateWork({
+          item: next,
+          prev,
+          snap,
+          now: checkedAt,
+          dlwatcher: dlwActive ? histories.get(id) : undefined,
+          log: logs.get(id) ?? [],
+          ruleState,
+          rules: settings.rules,
+          notified,
+        });
+        snapshots.set(id, ev.snapshot);
+        for (const [k, v] of ev.ruleState) {
+          if (v) ruleState.set(k, v);
+          else ruleState.delete(k);
+        }
+        if (ev.baseline) next = { ...next, baselineAt: checkedAt };
+        if (ev.hits.length > 0) {
+          for (const h of ev.hits) notified.set(h.dedupKey, checkedAt);
+          noticeWorks.push({
+            id,
+            title: next.title,
+            snapshot: ev.snapshot,
+            rules: ev.hits.map((h) => h.rule),
+            lowestBaseline: ev.lowestBaseline,
+          });
+        }
+        observations.push(observationFromSnapshot(ev.snapshot));
       }
+      items.set(id, next);
       outcomes.set(id, { status: info ? 'found' : 'missing' });
     }
-    await writeStore({ items, snapshots });
+    // §6.1 第 9 步、§4.2：整批一次寫入 storage、priceLog 一個 transaction，然後才送通知。
+    let notice: { id: string; content: NoticeContent } | undefined;
+    const patch: StorePatch = { items, snapshots, ruleState };
+    if (noticeWorks.length > 0) {
+      notice = { id: newNotificationId(), content: buildWorkNotice(noticeWorks, settings.hideTitlesInNotifications) };
+      patch.notified = notified;
+      patch.recentNotifications = [
+        toRecent(
+          notice.id,
+          notice.content,
+          noticeWorks.map((w) => w.id),
+          checkedAt,
+        ),
+        ...recent,
+      ];
+    }
+    await writeStore(patch);
     await appendPriceObservations(observations, priceLogGapMs(settings.checkIntervalHours));
-    return outcomes;
+    return { outcomes, notice };
   });
+  if (notice) await showNotification(notice.id, notice.content);
+  return outcomes;
 }
 
 export type DlwatcherOutcome =

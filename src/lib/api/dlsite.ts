@@ -86,7 +86,7 @@ export function parseProductInfoResponse(text: string, requestedIds: readonly st
 }
 
 /**
- * API 資料 → 本次快照（§6.1 第 1 步）。`episode` 的決定在 M4（§6.1 第 3 步）實作，這裡沿用上次的值。
+ * API 資料 → 本次快照（§6.1 第 1 步）。`episode` 先沿用上次的值，由 rules.ts 的 evaluateWork()（§6.1 第 3 步）重新決定。
  */
 export function toSnapshot(info: ProductInfo, prev: PriceSnapshot | undefined, checkedAt: string): PriceSnapshot | undefined {
   // is_sold_out 視同查不到（§5.3）：沿用上一次的價格；沒有上一次的資料時不寫快照。

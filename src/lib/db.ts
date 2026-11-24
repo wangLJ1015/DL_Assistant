@@ -105,6 +105,20 @@ export async function readAllHistory(): Promise<Map<string, HistoryRecord>> {
   return out;
 }
 
+/** 幾件作品的 history（一個 transaction；§6.1 一批處理用）。 */
+export async function readHistories(ids: readonly string[]): Promise<Map<string, HistoryRecord>> {
+  const out = new Map<string, HistoryRecord>();
+  if (ids.length === 0) return out;
+  const db = await openDb();
+  const store = db.transaction(HISTORY).objectStore(HISTORY);
+  const raws: unknown[] = await Promise.all(ids.map((id) => req(store.get(id))));
+  raws.forEach((raw, i) => {
+    const r = historyRecordSchema.safeParse(raw);
+    if (r.success && r.data.id === ids[i]) out.set(r.data.id, r.data);
+  });
+  return out;
+}
+
 export async function writeHistory(rec: HistoryRecord): Promise<void> {
   const db = await openDb();
   const tx = db.transaction(HISTORY, 'readwrite');
@@ -128,6 +142,23 @@ export async function readPriceLog(id: string): Promise<PriceLogEntry[]> {
   const db = await openDb();
   const all: unknown[] = await req(db.transaction(PRICE_LOG).objectStore(PRICE_LOG).getAll(workRange(id)));
   return validEntries(all).filter((e) => e.id === id);
+}
+
+/** 幾件作品的查價紀錄（一個 transaction；§6.1 一批處理用），每件依 `at` 由舊到新。 */
+export async function readPriceLogs(ids: readonly string[]): Promise<Map<string, PriceLogEntry[]>> {
+  const out = new Map<string, PriceLogEntry[]>();
+  if (ids.length === 0) return out;
+  const db = await openDb();
+  const store = db.transaction(PRICE_LOG).objectStore(PRICE_LOG);
+  const all: unknown[][] = await Promise.all(ids.map((id) => req(store.getAll(workRange(id)))));
+  all.forEach((raws, i) => {
+    const id = ids[i]!;
+    out.set(
+      id,
+      validEntries(raws).filter((e) => e.id === id),
+    );
+  });
+  return out;
 }
 
 /** 全部作品的查價紀錄（擴充功能頁面用），每件依 `at` 由舊到新。 */

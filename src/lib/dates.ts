@@ -61,6 +61,13 @@ export function localDate(iso: string): string {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
 }
 
+/** 通知用：使用者時區的「M/D HH:mm」（§6.2 截止時間）。 */
+export function localMonthDayTime(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getMonth() + 1}/${d.getDate()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
 /** 某個 UTC 時間在 JST 的年份。 */
 export function jstYear(iso: string): number {
   return new Date(isoToMs(iso) + JST_OFFSET).getUTCFullYear();

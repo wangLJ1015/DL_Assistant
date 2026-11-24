@@ -46,7 +46,7 @@
 | ~~`sender.url`~~ | ✅ M2（Chrome 157）：頁面 `history.pushState` 到 `/home/cart/` 之後，content script 送的訊息 `sender.url` 仍是文件載入時的網址（不會改變），頁面無法讓 `cartSnapshot` 的頁面檢查誤判。v0.11 起 `verify:m2` 把它當成檢查項目（v0.10 只印出來） | M2 |
 | service worker | ✅ M3（Chrome 157，2026-11-23）：用 CDP 在瀏覽器層級攔住 DLWatcher 請求、不附加到 service worker、清掉 `drain` alarm，請求 75 秒沒有回應時 service worker **沒有**被終止。Chrome 文件寫「fetch 回應超過 30 秒」可能被終止，所以設計不依賴這個行為：`apiGet` 30 秒逾時、處理中一直有 `drain` alarm、進度每一步寫回（§3.1、§4.1）。`verify:m3` 確認：處理到第 3/10 件時 `stopAllWorkers`，`drain` alarm 叫醒後從中斷處做完、每件只請求一次；一直不回應的請求 30 秒後放棄、約 90 秒後重試並存好（v0.14 起瀏覽器層級攔截不到時這一項算失敗，不會什麼都沒測就顯示成功） | M3 |
 | ~~DLWatcher 日期~~ | ✅ M3（2026-11-23）：`toISOString()` 格式的 UTC 字串；欄位在 `lowestPrice.start／end`（不在 `priceInfo` 裡）；進行中的特價，`end` 是**最後一次看到這個價格的時間**（不是未來的結束時間）。走勢點 `x`、`y` 是字串；不存在的作品回 404 HTML（§5.2） | M3 |
-| `storage.local.set` 多個 key | 一次寫入多個 key 是否不可分割（§4.2） | M4 |
+| `storage.local.set` 多個 key | ✅ M4（Chrome 158，2026-11-24）：`verify:m4` 在 service worker 裡不停用一次 `set` 寫兩個各約 1 MB 的 key（版本號遞增），1.5～3.5 秒後用 `taskkill /F /T` 強制結束整個 Chrome，同一個 profile 重開後讀回，4 輪兩個 key 的版本都一致（每輪約寫了 20～100 次）。這是實測，不是證明；Chrome 的 `storage.local` 底層是 LevelDB，一次 `set` 以一個 write batch 寫入，和實測結果相符。§4.2 的「一批一次 `set`」維持不變。另外確認：CDP `Extensions.loadUnpacked` 載入的擴充功能重開瀏覽器後不會保留，同一個路徑重新載入得到同一個 ID，`storage.local` 的資料還在 | M4 |
 | DLsite 圖片 | ✅（popup，Chrome 157）：擴充功能頁面以 `referrerPolicy="no-referrer"` 載入 `img.dlsite.jp` 的作品圖片成功（`verify:chrome`）。**未確認**：儀表板大量載入時是否被限流 | M5 |
 | 注入 UI 的樣式 | DLsite 頁面的 CSP 是否擋住 content script 插入 closed shadow root 的 `<style>`。被擋就改用 `new CSSStyleSheet()`＋`replaceSync()`，指派給 `shadowRoot.adoptedStyleSheets`（constructable stylesheet 不受頁面 CSP 的 `style-src` 限制）；要確認在 isolated world 建立的樣式表能否指派給頁面文件裡的 shadow root | M6 |
 | 右鍵選單 | `targetUrlPatterns` 實際能否比對含 `/=/` 的作品網址 | M6 |
