@@ -1,29 +1,20 @@
-// 追蹤清單與查價（background 專用）。M1：手動加入／移除、商品 API 查價。
-// 佇列、退避（§4.1）在 M3，通知規則（§6.1）在 M4。
-import { apiGet } from './api/endpoints';
-import { applyProductInfo, parseProductInfoResponse, toSnapshot, unavailableSnapshot } from './api/dlsite';
-import { nowIso } from './dates';
+// 追蹤清單的加入／移除與查價（background 專用）。
+// 查價本身排進 §4.1 的佇列（queue.ts），請求與寫入在 price-check.ts。通知規則（§6.1）在 M4。
+import { isoToMs, nowIso } from './dates';
 import { isWorkId } from './ids';
-import { MAX_NOT_FOUND_COUNT, MAX_TRACKED_ITEMS, type Settings, type TrackedItem } from './models';
+import { MAX_TRACKED_ITEMS, type Settings, type TrackedItem } from './models';
 import type { WriteReply } from './messages';
-import { readItems, readSettings, readSnapshots, readUntracked, writeQueue, writeStore } from './storage';
-
-const PRODUCT_API_INTERVAL_MS = 1000; // §3.1 請求之間間隔至少 1 秒
-const PRODUCT_API_BATCH = 100;
-
-let nextProductRequestAt = 0;
-
-/** 測試用：清掉請求間隔的計時。 */
-export function __resetThrottleForTest(): void {
-  nextProductRequestAt = 0;
-}
-
-async function waitForProductSlot(): Promise<void> {
-  const now = Date.now();
-  const wait = nextProductRequestAt - now;
-  nextProductRequestAt = Math.max(now, nextProductRequestAt) + PRODUCT_API_INTERVAL_MS;
-  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-}
+import { enqueueDlwatcher, kick, rescheduleCheck, requestChecks } from './queue';
+import {
+  RECHECK_COOLDOWN_MS,
+  readItems,
+  readRecheckAt,
+  readSettings,
+  readSnapshots,
+  readUntracked,
+  writeQueue,
+  writeStore,
+} from './storage';
 
 export type TrackSource = TrackedItem['source'];
 
@@ -62,16 +53,23 @@ export async function trackItem(id: string, source: TrackSource, opts: TrackOpti
   });
   if (reply.ok && reply.check) {
     // 查價結果透過 storage.onChanged 更新畫面；失敗時畫面顯示「還沒有價格」與「重新查價」。
-    const job = refreshPrices([id]).catch((): RefreshResult => ({ ok: false, reason: 'failed' }));
+    const job = requestChecks([id], { awaitProduct: opts.awaitPrice, dlwatcher: true }).catch(() => undefined);
     if (opts.awaitPrice) await job;
   }
   return reply.ok ? { ok: true } : reply;
+}
+
+/** content script 自動加入的作品：排進佇列，不等結果。 */
+export function checkNewItems(ids: readonly string[]): void {
+  if (ids.length === 0) return;
+  void requestChecks(ids, { dlwatcher: true }).catch((e: unknown) => console.warn('[DL_Assistant] 自動加入後的查價失敗', e));
 }
 
 export async function untrackItem(id: string): Promise<WriteReply> {
   return writeQueue(async () => {
     const [items, snapshots, untracked] = await Promise.all([readItems(), readSnapshots(), readUntracked()]);
     if (!items.delete(id)) return { ok: true };
+    // §4.2 清理：快照刪掉；priceLog 與 DLWatcher 的歷史保留（重新追蹤時還能用）。
     snapshots.delete(id);
     // 移除紀錄：購物車頁同步不會再把它加回來（§5.3 untracked）
     untracked.delete(id);
@@ -83,60 +81,92 @@ export async function untrackItem(id: string): Promise<WriteReply> {
 
 export type RefreshResult = { ok: true; updated: number; missing: number; invalid: number } | { ok: false; reason: string };
 
-/** 查詢商品 API 並更新快照。暫停中的作品略過（§4.1）。 */
+/**
+ * 立即查價：排到商品 API 佇列最前面，照樣套用請求間隔與退避（§3.2.4），等查完才回傳。
+ * 暫停中與不在清單裡的作品略過（§4.1）。
+ */
 export async function refreshPrices(ids: readonly string[]): Promise<RefreshResult> {
   const items = await readItems();
   const targets = [...new Set(ids)].filter((id) => items.get(id)?.paused === false);
+  if (targets.length === 0) return { ok: true, updated: 0, missing: 0, invalid: 0 };
+  const outcomes = (await requestChecks(targets, { awaitProduct: true }))!;
   let updated = 0;
   let missing = 0;
   let invalid = 0;
-  for (let i = 0; i < targets.length; i += PRODUCT_API_BATCH) {
-    const batch = targets.slice(i, i + PRODUCT_API_BATCH);
-    await waitForProductSlot();
-    const res = await apiGet('productInfo', { ids: batch });
-    if (!res.ok) return { ok: false, reason: res.kind === 'http' ? `http${res.status}` : res.kind };
-    const parsed = parseProductInfoResponse(res.text, batch);
-    if (!parsed.ok) return { ok: false, reason: parsed.reason };
-    const checkedAt = nowIso();
-    const invalidIds = new Set(parsed.invalid.map((x) => x.id));
-    await writeQueue(async () => {
-      const [curItems, snapshots] = await Promise.all([readItems(), readSnapshots()]);
-      for (const id of batch) {
-        const item = curItems.get(id);
-        if (!item) continue; // 查價途中被移除
-        // §3.2.3：驗證失敗只讓這一筆失敗，不當成「查不到」，快照維持原樣。
-        if (invalidIds.has(id)) continue;
-        const info = parsed.found.get(id);
-        const prev = snapshots.get(id);
-        const snap = info ? toSnapshot(info, prev, checkedAt) : unavailableSnapshot(prev, checkedAt);
-        const next = info ? applyProductInfo(item, info) : item;
-        curItems.set(id, withNotFoundCount(next, !snap?.available));
-        if (snap) snapshots.set(id, snap);
-      }
-      await writeStore({ items: curItems, snapshots });
-    });
-    updated += parsed.found.size;
-    missing += parsed.missing.length;
-    invalid += invalidIds.size;
+  for (const o of outcomes.values()) {
+    if (o.status === 'failed') return { ok: false, reason: o.reason };
+    if (o.status === 'found') updated++;
+    else if (o.status === 'missing') missing++;
+    else invalid++;
   }
   return { ok: true, updated, missing, invalid };
 }
 
-/** 查不到（API 沒回傳、is_sold_out）時累加連續次數，查得到就清掉（§5.3）。 */
-function withNotFoundCount(item: TrackedItem, notFound: boolean): TrackedItem {
-  const { notFoundCount, ...rest } = item;
-  if (!notFound) return rest;
-  return { ...rest, notFoundCount: Math.min((notFoundCount ?? 0) + 1, MAX_NOT_FOUND_COUNT) };
+/**
+ * `recheck {ids}`（§3.2.4）：ids 都必須在追蹤清單裡，而且沒有暫停；同一件作品 10 分鐘內只重新查價一次。
+ * 這次沒有真的送出請求（排隊中、退避中）時把冷卻還回去，使用者稍後可以再按。
+ */
+export async function recheck(ids: readonly string[]): Promise<WriteReply> {
+  const due = await writeQueue(async (): Promise<{ id: string; at: string }[] | WriteReply> => {
+    const [items, recheckAt] = await Promise.all([readItems(), readRecheckAt()]);
+    if (!ids.every((id) => items.has(id))) return { ok: false, reason: 'notTracked' };
+    if (ids.some((id) => items.get(id)?.paused)) return { ok: false, reason: 'paused' };
+    const now = Date.now();
+    const due = [...new Set(ids)].filter((id) => {
+      const last = recheckAt.get(id);
+      return !last || now - isoToMs(last) >= RECHECK_COOLDOWN_MS;
+    });
+    if (due.length === 0) return { ok: false, reason: 'cooldown' };
+    const at = nowIso();
+    for (const id of due) {
+      recheckAt.delete(id);
+      recheckAt.set(id, at);
+    }
+    await writeStore({ recheckAt });
+    return due.map((id) => ({ id, at }));
+  });
+  if (!Array.isArray(due)) return due;
+  const r = await refreshPrices(due.map((d) => d.id));
+  if (!r.ok && (r.reason === 'queued' || r.reason === 'backoff')) {
+    await writeQueue(async () => {
+      const recheckAt = await readRecheckAt();
+      for (const d of due) if (recheckAt.get(d.id) === d.at) recheckAt.delete(d.id);
+      await writeStore({ recheckAt });
+    });
+  }
+  if (!r.ok) return r;
+  return r.invalid > 0 ? { ok: false, reason: 'invalidData' } : { ok: true };
 }
 
 export async function updateSettings(partial: Partial<Settings>): Promise<WriteReply> {
-  return writeQueue(async () => {
+  const { before, after } = await writeQueue(async () => {
     const cur = await readSettings();
     const next: Settings = { ...cur };
     for (const [k, v] of Object.entries(partial) as [keyof Settings, unknown][]) {
       if (v !== undefined) (next as Record<string, unknown>)[k] = k === 'rules' ? { ...(v as Settings['rules']) } : v;
     }
     await writeStore({ settings: next });
-    return { ok: true };
+    return { before: cur, after: next };
   });
+  // §3.2.4：改查價週期時重建 alarm。
+  if (after.checkIntervalHours !== before.checkIntervalHours) await rescheduleCheck(after);
+  // 重新開啟 DLWatcher：補查 23 小時內沒請求過的作品（關閉時佇列由 queue.ts 清掉）。
+  if (after.dlwatcherEnabled && !before.dlwatcherEnabled) await refillDlwatcher();
+  return { ok: true };
+}
+
+/** `resumeDlwatcher`（§3.6）：使用者手動重新開啟被自動暫停的 DLWatcher。 */
+export async function resumeDlwatcher(): Promise<WriteReply> {
+  await writeQueue(async () => {
+    const { dlwatcherAutoPausedAt: _, ...rest } = await readSettings();
+    await writeStore({ settings: rest, dlwatcherHealth: {} });
+  });
+  await refillDlwatcher();
+  return { ok: true };
+}
+
+async function refillDlwatcher(): Promise<void> {
+  const items = await readItems();
+  await enqueueDlwatcher([...items.values()].filter((i) => !i.paused).map((i) => i.id));
+  void kick();
 }

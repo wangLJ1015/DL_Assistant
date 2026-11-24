@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { isoToMs, jstDate, msToIso, nowIso } from './dates';
 import { CART_SNAPSHOT_MAX_NEW, DAILY_AUTO_ADD_LIMIT, isoSchema, MAX_TRACKED_ITEMS } from './models';
 import { readDailyAutoAdd, readItems, readUntracked, SESSION_KEYS, writeQueue, writeStore } from './storage';
-import { newTrackedItem, refreshPrices } from './tracking';
+import { checkNewItems, newTrackedItem } from './tracking';
 
 // ---- 同一個 documentId 只接受一次（storage.session 的 seenDocuments）----
 
@@ -109,8 +109,7 @@ export async function autoTrack(ids: readonly string[], source: 'cart' | 'page',
     });
     return { added, skipped, ...(added.length === 0 && blockedBy ? { blockedBy } : {}) };
   });
-  if (result.added.length > 0)
-    void refreshPrices(result.added).catch((e: unknown) => console.warn('[DL_Assistant] 自動加入後的查價失敗', e));
+  checkNewItems(result.added);
   return result;
 }
 

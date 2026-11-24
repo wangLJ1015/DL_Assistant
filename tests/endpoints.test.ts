@@ -150,17 +150,52 @@ describe('apiGet', () => {
     expect(f.mock.calls).toEqual([
       [
         'https://www.dlsite.com/maniax/product/info/ajax?product_id=RJ01014447%2CRJ123456&cdn_cache_min=1',
-        { method: 'GET', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer' },
+        { method: 'GET', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', signal: expect.any(AbortSignal) },
       ],
       [
         'https://dlwatcher.com/product/RJ01014447.json',
-        { method: 'GET', credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store' },
+        {
+          method: 'GET',
+          credentials: 'omit',
+          redirect: 'error',
+          referrerPolicy: 'no-referrer',
+          cache: 'no-store',
+          signal: expect.any(AbortSignal),
+        },
       ],
       [
         'https://www.dlsite.com/home/mypage/coupon/list/ajax',
-        { method: 'GET', credentials: 'same-origin', redirect: 'manual', cache: 'no-store', mode: 'same-origin' },
+        {
+          method: 'GET',
+          credentials: 'same-origin',
+          redirect: 'manual',
+          cache: 'no-store',
+          mode: 'same-origin',
+          signal: expect.any(AbortSignal),
+        },
       ],
     ]);
+  });
+
+  it('gives up after 30 seconds and reports a network failure (§4.1)', async () => {
+    const controller = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, 'timeout').mockReturnValue(controller.signal);
+    try {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(
+          (_url: string, init: RequestInit) =>
+            new Promise((_, reject) => init.signal!.addEventListener('abort', () => reject(new DOMException('timeout', 'TimeoutError')))),
+        ),
+      );
+      __setRuntimeEnvForTest(() => SW_ENV);
+      const job = apiGet('dlwatcher', { id: 'RJ01014447' });
+      expect(timeout).toHaveBeenCalledWith(30_000);
+      controller.abort();
+      expect(await job).toEqual({ ok: false, kind: 'network' });
+    } finally {
+      timeout.mockRestore();
+    }
   });
 
   it('rejects invalid product ids before fetching', async () => {

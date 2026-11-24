@@ -59,7 +59,7 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
   - `setSettings {partial}` 只接受使用者可編輯的欄位：`checkIntervalHours`（1～24 的整數）、`dlwatcherEnabled`、`usePointPaymentMethod`、`treatUnknownDiscountedAsUsable`、`hideTitlesInNotifications`、`showBadge`、`rules`（5 個布林，也是 strict）。`dlwatcherAutoPausedAt` 只由 background 與 `resumeDlwatcher` 改，`reservedCouponKeys` 只由 `setCouponReserved` 改。改 `checkIntervalHours` 時重建 alarm。
   - `setTarget {id, price?}`：`id` 必須在追蹤清單裡，`price` 用 `intIn(0, 1_000_000)`。
   - `setCouponReserved {key, reserved}`：`key` 必須是目前 `coupons` 裡的 key，長度 ≤ 300。
-  - `recheck {ids}`：`ids` 都必須在追蹤清單裡。
+  - `recheck {ids}`：`ids` 都必須在追蹤清單裡，否則回 `{ ok: false, reason: 'notTracked' }`；有暫停中的作品回 `'paused'`。全部都在 10 分鐘冷卻內時回 `'cooldown'`；這次排不到（商品 API 在退避、這次喚醒的時間用完）時回 `'backoff'` 或 `'queued'`，作品留在佇列稍後自動查價，冷卻還回去（沒有送出請求就不算用掉）。
 - **回覆的形狀**（和請求一樣用快照測試鎖住）：
   ```ts
   // content script → background 的 couponSyncResult.result
@@ -148,7 +148,7 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
 
   - `dlwatcher` 的路徑用 `^/product/(RJ|RE|BJ|VJ)(\d{6}|\d{8})\.json$` 整段比對。
   - `productInfo`、`dlwatcher` 加上 `referrerPolicy: 'no-referrer'`；`couponList` 維持瀏覽器預設，和頁面自己發的請求一致。
-  - `couponList`、`dlwatcher` 加上 `cache: 'no-store'`（DLWatcher 的 24 小時快取由我們自己管）。
+  - `couponList`、`dlwatcher` 加上 `cache: 'no-store'`（DLWatcher 的快取（23 小時內不重複請求，§3.1）由我們自己管）。
   - `couponList` 加上 `mode: 'same-origin'`：萬一 content script 跑在別的來源（例如 `matches` 寫錯），請求會直接失敗，不會變成跨來源請求。從擴充功能頁面或 background 呼叫時來源是 `chrome-extension://`，`same-origin` 也不會帶 DLsite 的 cookie。
   - `productInfo`、`dlwatcher` 的 `credentials: 'omit'` 是必要的：有 host permission 的擴充功能請求，可能被當成同站而帶上 DLsite 的登入 cookie。
 - `assertAllowed()` 也檢查**參數值**：`product_id` 以 `,` 分開後 1～100 個、每個都通過 `isWorkId()`、沒有重複；`cdn_cache_min === '1'`；每個參數名稱只出現一次；`username`、`password`、`hash` 都是空字串。

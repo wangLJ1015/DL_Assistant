@@ -5,44 +5,82 @@ import { WorkImage } from '../../components/WorkImage';
 import { WorkLink } from '../../components/WorkLink';
 import { isWorkId } from '../../lib/ids';
 import type { ExtMessage, WriteReply } from '../../lib/messages';
-import { NOT_FOUND_SUGGEST_REMOVE, type PriceSnapshot, type TrackedItem } from '../../lib/models';
+import {
+  NOT_FOUND_SUGGEST_REMOVE,
+  type HistoryRecord,
+  type PriceLogEntry,
+  type PriceSnapshot,
+  type Settings,
+  type TrackedItem,
+} from '../../lib/models';
 import { isOnSale } from '../../lib/rules';
-import { jstDate, nowIso } from '../../lib/dates';
-import { readDailyAutoAdd, readItems, readSnapshots, readStorageLock, STORAGE_KEYS } from '../../lib/storage';
+import { jstDate, localDate, nowIso } from '../../lib/dates';
+import { onDbVersionChange, readAllHistory, readAllPriceLogs } from '../../lib/db';
+import { summarizeLowest } from '../../lib/history';
+import { readDailyAutoAdd, readItems, readSettings, readSnapshots, readStorageLock, STORAGE_KEYS } from '../../lib/storage';
 
 interface Data {
   items: TrackedItem[];
   snapshots: Map<string, PriceSnapshot>;
+  settings: Settings;
+  /** DLWatcher 的史低與歷史、自己的查價紀錄（IndexedDB，§5.3）。 */
+  histories: Map<string, HistoryRecord>;
+  logs: Map<string, PriceLogEntry[]>;
   /** 今天因為上限沒有自動加入的件數（§3.2.4）。 */
   autoAddSkipped: number;
 }
 
+/** 這些 key 變動時重新讀取。IndexedDB 沒有變動事件：background 每處理完一件就會寫回 queues，跟著重讀。 */
+const WATCHED_KEYS = [
+  STORAGE_KEYS.items,
+  STORAGE_KEYS.snapshots,
+  STORAGE_KEYS.dailyAutoAdd,
+  STORAGE_KEYS.settings,
+  STORAGE_KEYS.queues,
+] as const;
+
 /** 擴充功能頁面直接讀 storage，並用 onChanged 更新（§4.2）。 */
-function useTrackedData(): Data | null {
+function useTrackedData(): { data: Data | null; dbOutdated: boolean } {
   const [data, setData] = useState<Data | null>(null);
+  const [dbOutdated, setDbOutdated] = useState(false);
   useEffect(() => {
     let alive = true;
+    // 讀取可能晚到：只採用最新一次的結果（M3 審查：舊的結果不能蓋掉新的）
+    let seq = 0;
     const load = async () => {
-      const [items, snapshots, daily] = await Promise.all([readItems(), readSnapshots(), readDailyAutoAdd(jstDate(nowIso()))]);
-      if (alive)
+      const mine = ++seq;
+      const [items, snapshots, settings, daily, histories, logs] = await Promise.all([
+        readItems(),
+        readSnapshots(),
+        readSettings(),
+        readDailyAutoAdd(jstDate(nowIso())),
+        readAllHistory().catch(() => new Map<string, HistoryRecord>()),
+        readAllPriceLogs().catch(() => new Map<string, PriceLogEntry[]>()),
+      ]);
+      if (alive && mine === seq)
         setData({
           items: [...items.values()].sort((a, b) => b.addedAt.localeCompare(a.addedAt)),
           snapshots,
+          settings,
+          histories,
+          logs,
           autoAddSkipped: daily.skipped,
         });
     };
     void load();
     const onChanged = (changes: Record<string, unknown>, area: string) => {
-      if (area === 'local' && (STORAGE_KEYS.items in changes || STORAGE_KEYS.snapshots in changes || STORAGE_KEYS.dailyAutoAdd in changes))
-        void load();
+      if (area === 'local' && WATCHED_KEYS.some((k) => k in changes)) void load();
     };
     browser.storage.onChanged.addListener(onChanged);
+    // §4.2：資料庫被新版本升級時關閉連線，提示重新開啟
+    const offDb = onDbVersionChange(() => setDbOutdated(true));
     return () => {
       alive = false;
       browser.storage.onChanged.removeListener(onChanged);
+      offDb();
     };
   }, []);
-  return data;
+  return { data, dbOutdated };
 }
 
 async function send(msg: ExtMessage): Promise<WriteReply> {
@@ -64,9 +102,14 @@ const REASON_TEXT: Record<string, string> = {
   unparsable: 'DLsite 回應異常',
   notObject: 'DLsite 回應異常',
   invalidData: 'DLsite 回傳的資料格式不符',
+  cooldown: '10 分鐘內已經重新查價過，請稍後再試',
+  queued: '已排入查價佇列，稍後會自動查價',
+  backoff: 'DLsite 暫時無法連線，稍後會自動重試',
+  notTracked: '這個作品不在追蹤清單裡',
+  paused: '這個作品已暫停追蹤',
 };
 const reasonText = (reason: string) =>
-  REASON_TEXT[reason] ?? (/^httpd+$/.test(reason) ? `DLsite 回應錯誤（${reason.slice(4)}）` : REASON_TEXT.failed);
+  REASON_TEXT[reason] ?? (/^http\d+$/.test(reason) ? `DLsite 回應錯誤（${reason.slice(4)}）` : REASON_TEXT.failed);
 
 /** setAccessLevel 失敗時顯示警告（§4.2）。 */
 function useStorageLockFailed(): boolean {
@@ -81,6 +124,77 @@ function useStorageLockFailed(): boolean {
 }
 
 const yen = (n: number) => `¥${n.toLocaleString('ja-JP')}`;
+
+/** 史低：DLWatcher 與自己的紀錄兩個數字並列（§3.6）。 */
+function LowestCell({ id, data }: { id: string; data: Data }) {
+  const s = summarizeLowest(data.histories.get(id), data.logs.get(id) ?? [], data.settings);
+  if (!s.dlwatcher && !s.own) return <div className="text-xs text-gray-500">還沒有史低資料</div>;
+  return (
+    <div className="mt-0.5 space-y-0.5 text-xs text-gray-600" data-testid="lowest">
+      {s.dlwatcher && (
+        <div data-testid="lowest-dlwatcher">
+          史低 <span className="font-bold text-gray-900">{yen(s.dlwatcher.price)}</span>（{localDate(s.dlwatcher.start)}〜
+          {localDate(s.dlwatcher.end)}）<span className="text-gray-400">DLWatcher</span>
+          {/* §3.6：保留下來的資料要看得出是什麼時候取得的，一律標示 */}
+          <span className="ml-1 text-gray-400" data-testid="lowest-fetched">
+            資料取得於 {localDate(s.dlwatcher.fetchedAt)}
+          </span>
+          {s.dlwatcher.divergent && <span className="ml-1 text-amber-700">DLWatcher 資料與自己的紀錄差異很大</span>}
+        </div>
+      )}
+      {s.own && (
+        <div data-testid="lowest-own">
+          {s.dlwatcher ? '自己的紀錄' : '史低'} <span className="font-bold text-gray-900">{yen(s.own.price)}</span>
+          （自 {localDate(s.own.since)} 開始追蹤以來的最低價）
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** DLWatcher 開關與說明（§3.3），被自動暫停時顯示重新開啟（§3.6）。 */
+function DlwatcherSettings({ settings, onError }: { settings: Settings; onError: (reason: string) => void }) {
+  const [busy, setBusy] = useState(false);
+  const run = async (msg: ExtMessage) => {
+    setBusy(true);
+    const r = await send(msg);
+    setBusy(false);
+    if (!r.ok) onError(r.reason);
+  };
+  return (
+    <details className="mt-3 border-t border-gray-200 pt-2" open={settings.dlwatcherAutoPausedAt !== undefined}>
+      <summary className="cursor-pointer text-xs text-gray-600">設定</summary>
+      {settings.dlwatcherAutoPausedAt && (
+        <p role="status" className="mt-2 rounded bg-amber-100 px-2 py-1 text-xs text-amber-900" data-testid="dlwatcher-paused">
+          DLWatcher 似乎已停止服務，已改用自己的紀錄（{localDate(settings.dlwatcherAutoPausedAt)} 自動暫停）。
+          <button
+            type="button"
+            className="ml-1 text-blue-700 underline"
+            disabled={busy}
+            onClick={() => void run({ type: 'resumeDlwatcher' })}
+          >
+            重新開啟
+          </button>
+        </p>
+      )}
+      <label className="mt-2 flex items-start gap-2 text-xs">
+        <input
+          type="checkbox"
+          data-testid="dlwatcher-enabled"
+          checked={settings.dlwatcherEnabled}
+          disabled={busy}
+          onChange={(e) => void run({ type: 'setSettings', partial: { dlwatcherEnabled: e.target.checked } })}
+        />
+        <span>
+          使用 DLWatcher 的史低與價格走勢
+          <span className="block text-gray-500">
+            只有你按「查史低」或作品在追蹤清單裡時，才會把作品編號送給 DLWatcher。關閉後只用自己的查價紀錄。
+          </span>
+        </span>
+      </label>
+    </details>
+  );
+}
 
 interface PriceCellProps {
   item: TrackedItem;
@@ -129,7 +243,7 @@ function PriceCell({ item, snap, checking, error, onRecheck }: PriceCellProps) {
 }
 
 export function App() {
-  const data = useTrackedData();
+  const { data, dbOutdated } = useTrackedData();
   const [input, setInput] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -175,6 +289,11 @@ export function App() {
   return (
     <main className="w-[380px] p-3 text-sm text-gray-900">
       <h1 className="mb-2 text-base font-bold">DL_Assistant</h1>
+      {dbOutdated && (
+        <p role="alert" className="mb-2 rounded bg-amber-100 px-2 py-1 text-amber-900">
+          擴充功能已更新，請關閉這個視窗再重新開啟。
+        </p>
+      )}
       {lockFailed && (
         <p role="alert" className="mb-2 rounded bg-amber-100 px-2 py-1 text-amber-900">
           這個 Chrome 版本無法限制網頁程式讀取擴充功能的資料。請更新 Chrome。
@@ -246,11 +365,13 @@ export function App() {
                   onRecheck={() => void recheck(item.id)}
                 />
               </div>
+              <LowestCell id={item.id} data={data} />
             </div>
           </li>
         ))}
       </ul>
       {data && data.items.length === 0 && <p className="mt-3 text-gray-500">還沒有追蹤任何作品。</p>}
+      {data && <DlwatcherSettings settings={data.settings} onError={(r) => setError(reasonText(r) ?? null)} />}
     </main>
   );
 }

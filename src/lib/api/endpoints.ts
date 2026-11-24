@@ -24,6 +24,12 @@ interface EndpointDef {
 
 const MB = 1024 * 1024;
 
+/**
+ * 每個請求（含讀取回應本體）最多等 30 秒，逾時當作連不上（§4.1）。
+ * 回應一直不來時，查價佇列不會卡在這一步；Chrome 文件也寫 fetch 回應超過 30 秒時 service worker 可能被終止。
+ */
+export const REQUEST_TIMEOUT_MS = 30_000;
+
 const ENDPOINTS: Readonly<Record<EndpointKey, EndpointDef>> = Object.freeze({
   productInfo: {
     origin: 'https://www.dlsite.com',
@@ -207,7 +213,7 @@ export async function apiGet<K extends EndpointKey>(key: K, params: EndpointPara
   const url = assertAllowed(key, buildUrl(key, params));
   let res: Response;
   try {
-    res = await fetch(url.href, { ...def.init });
+    res = await fetch(url.href, { ...def.init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
   } catch {
     return { ok: false, kind: 'network' };
   }

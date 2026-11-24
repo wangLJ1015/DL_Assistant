@@ -4,7 +4,7 @@
 //
 // 和 verify-m1.ts 一樣用 CDP 驅動臨時設定檔的 Chrome。DLsite 頁面全部由 CDP 回應假的 HTML
 // （結構照 2026-11-23 實測的 DLsite 寫），不會連到 DLsite，也不會真的加入購物車。
-// 背景查價（商品 API）也由 CDP 回應 `[]`，整個流程不發出任何對外請求。
+// 背景查價也由 CDP 回應（商品 API 回 `[]`、DLWatcher 回 404，M3 起加入追蹤也會查 DLWatcher），整個流程不發出任何對外請求。
 // 環境變數：CHROME_PATH、HEADLESS=0（同 verify-m1.ts）。
 import { spawn } from 'node:child_process';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -131,6 +131,8 @@ async function main() {
         void cdp.send('Fetch.continueRequest', { requestId: e.params.requestId }, e.sessionId).catch(() => undefined);
       } else if (u.host === 'www.dlsite.com' && u.pathname === '/maniax/product/info/ajax') {
         reply(200, 'application/json', '[]');
+      } else if (u.host === 'dlwatcher.com' && u.pathname.startsWith('/product/')) {
+        reply(404, 'text/html', 'not found');
       } else if (u.host === 'www.dlsite.com' && Object.hasOwn(FAKE, u.pathname)) {
         reply(200, 'text/html; charset=utf-8', FAKE[u.pathname]!);
       } else {
@@ -375,7 +377,7 @@ async function main() {
     );
 
     record(
-      '沒有需要擋下的對外請求（DLsite 頁面與商品 API 全部由 CDP 回應）',
+      '沒有需要擋下的對外請求（DLsite 頁面、商品 API、DLWatcher 全部由 CDP 回應）',
       realRequests.length === 0,
       realRequests.slice(0, 3).join(' | ') || 'none',
     );
