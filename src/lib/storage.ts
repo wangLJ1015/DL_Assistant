@@ -153,7 +153,7 @@ async function readIdTimes(key: string): Promise<Map<string, string>> {
   return new Map(r.success ? r.data : []);
 }
 
-/** 每件作品最近一次請求 DLWatcher 的時間（§3.1：24 小時內最多一次）。 */
+/** 每件作品最近一次請求 DLWatcher 的時間（§3.1：23 小時內最多一次）。 */
 export const readDlwatcherLastRequest = () => readIdTimes(STORAGE_KEYS.dlwatcherLastRequest);
 /** 每件作品最近一次 `recheck` 的時間（§3.2.4：10 分鐘冷卻）。 */
 export const readRecheckAt = () => readIdTimes(STORAGE_KEYS.recheckAt);

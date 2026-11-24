@@ -12,16 +12,8 @@ import { MAX_CURVE_POINTS, MAX_SALES, type HistoryRecord, type PriceLogEntry } f
 import { intIn, summarizeIssues } from '../schema';
 
 /** 0～1 的比例：數字，或最多 20 字的十進位字串（實測是字串）。範圍由合理性檢查負責。 */
-const ratio = z
-  .union([
-    z.number(),
-    z
-      .string()
-      .max(20)
-      .regex(/^-?\d{1,6}(?:\.\d{1,12})?$/)
-      .transform(Number),
-  ])
-  .pipe(z.number().finite());
+const RATIO_RE = /^-?\d{1,6}(?:\.\d{1,12})?$/;
+const ratio = z.union([z.number(), z.string().max(20).regex(RATIO_RE).transform(Number)]).pipe(z.number().finite());
 
 const priceInfoSchema = z.object({
   price: intIn(0, 1_000_000),
@@ -118,24 +110,31 @@ export function parseDlwatcherResponse(text: string, id: string): ParseDlwatcher
 
 const DAY = 24 * 3_600_000;
 
-export type SanityFailure = 'lowestTooHigh' | 'lowestTooLow' | 'badPeriod' | 'curveOutOfRange';
+export type SanityFailure = 'regularPriceMismatch' | 'lowestTooHigh' | 'lowestTooLow' | 'badPeriod' | 'curveOutOfRange';
 
 /**
- * §3.6 合理性檢查（防「格式正確但內容是假的」資料）。通過回傳 null。
- * - lowest.price ≤ max(regularPrice, 自己紀錄裡見過的最大 officialPrice)，而且 ≥ floor(regularPrice × 0.05)
+ * §3.6 合理性檢查（防「格式正確但內容是假的」資料，例如網域換了持有者）。通過回傳 null。
+ * `officialPrices`：DLsite 給的原價（自己的 priceLog 與目前的快照）。DLWatcher 的 regularPrice 也是它自己給的，
+ * 不能單獨當基準：有 DLsite 的原價時，regularPrice 要在它們的 0.5～2 倍之間。
+ * - lowest.price ≤ max(regularPrice, 見過的最大 officialPrice)，而且 ≥ floor(max(regularPrice, 見過的最大 officialPrice) × 0.05)
  * - 每段期間（史低與最近特價）：start ≤ end、start ≤ 現在 + 1 天、end ≤ 現在 + 400 天
  * - 走勢點的 x、y 都在 0～1
  */
-export function checkDlwatcherSanity(data: DlwatcherData, ownLog: readonly PriceLogEntry[], nowMs: number): SanityFailure | null {
+export function checkDlwatcherSanity(data: DlwatcherData, officialPrices: readonly number[], nowMs: number): SanityFailure | null {
   const periodOk = (p: { start: string; end: string }) => {
     const s = isoToMs(p.start);
     const e = isoToMs(p.end);
     return s <= e && s <= nowMs + DAY && e <= nowMs + 400 * DAY;
   };
+  const maxOfficial = officialPrices.reduce((m, v) => Math.max(m, v), 0);
+  if (maxOfficial > 0) {
+    const minOfficial = officialPrices.reduce((m, v) => Math.min(m, v), maxOfficial);
+    if (data.regularPrice < minOfficial * 0.5 || data.regularPrice > maxOfficial * 2) return 'regularPriceMismatch';
+  }
   if (data.lowest) {
-    const maxOfficial = ownLog.reduce((m, e) => Math.max(m, e.officialPrice), 0);
-    if (data.lowest.price > Math.max(data.regularPrice, maxOfficial)) return 'lowestTooHigh';
-    if (data.lowest.price < Math.floor(data.regularPrice * 0.05)) return 'lowestTooLow';
+    const reference = Math.max(data.regularPrice, maxOfficial);
+    if (data.lowest.price > reference) return 'lowestTooHigh';
+    if (data.lowest.price < Math.floor(reference * 0.05)) return 'lowestTooLow';
     if (!periodOk(data.lowest)) return 'badPeriod';
   }
   if (!data.sales.every(periodOk)) return 'badPeriod';
@@ -173,3 +172,6 @@ export function toHistoryRecord(data: DlwatcherData, fetchedAt: string, divergen
   if (divergent) rec.divergent = true;
   return rec;
 }
+
+/** 測試用：regex 本身（§3.2.6 ReDoS 測試直接對 regex 餵長字串）。 */
+export const __regexForTest = { RATIO_RE, YEAR_KEY };

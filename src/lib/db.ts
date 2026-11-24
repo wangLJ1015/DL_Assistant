@@ -21,6 +21,7 @@ export function onDbVersionChange(fn: () => void): () => void {
 
 function openDb(): Promise<IDBDatabase> {
   dbPromise ??= new Promise<IDBDatabase>((resolve, reject) => {
+    let gaveUp = false;
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.addEventListener('upgradeneeded', () => {
       const db = req.result;
@@ -29,6 +30,10 @@ function openDb(): Promise<IDBDatabase> {
     });
     req.addEventListener('success', () => {
       const db = req.result;
+      if (gaveUp) {
+        db.close();
+        return;
+      }
       db.addEventListener('versionchange', () => {
         db.close();
         dbPromise = null;
@@ -44,7 +49,11 @@ function openDb(): Promise<IDBDatabase> {
       reject(req.error ?? new Error('indexedDB.open failed'));
     });
     req.addEventListener('blocked', () => {
-      // 舊版本的連線還開著；等它收到 versionchange 關閉後會繼續。
+      // 舊版本的連線還開著（別的頁面沒有關閉連線）：不要一直等，否則 background 的寫入全部卡在這裡。
+      // 這次當作失敗，下次再開一次（呼叫端的錯誤處理會晚一點再試）。
+      gaveUp = true;
+      dbPromise = null;
+      reject(new Error('indexedDB.open blocked by an older connection'));
     });
   });
   return dbPromise;

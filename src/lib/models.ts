@@ -156,12 +156,27 @@ export const queuesSchema = z.object({ productInfo: queueSchema, dlwatcher: queu
 export type Queues = z.infer<typeof queuesSchema>;
 export type QueueSource = keyof Queues;
 
-const backoffEntrySchema = z.object({ failures: z.number().int().min(0).max(3), pausedUntil: isoSchema.optional() }).strict();
+const backoffEntrySchema = z
+  .object({
+    /** 429／5xx 連續失敗次數（§3.1）。 */
+    failures: z.number().int().min(0).max(3),
+    pausedUntil: isoSchema.optional(),
+    /** 連不上（離線、逾時、DNS、轉址）的連續次數；重試間隔隨次數加長（§3.1）。 */
+    networkFailures: z.number().int().min(1).max(10_000).optional(),
+  })
+  .strict();
 export type BackoffEntry = z.infer<typeof backoffEntrySchema>;
 export const backoffSchema = z.object({ productInfo: backoffEntrySchema, dlwatcher: backoffEntrySchema }).strict();
 export type Backoff = z.infer<typeof backoffSchema>;
 
-export const dlwatcherHealthSchema = z.object({ allFailingSince: isoSchema.optional() }).strict();
+export const dlwatcherHealthSchema = z
+  .object({
+    /** 這一段連續失敗從什麼時候開始（§3.6）。 */
+    allFailingSince: isoSchema.optional(),
+    /** 最近一次失敗；距離上一次失敗太久（中間沒有請求）就重新起算。 */
+    lastFailureAt: isoSchema.optional(),
+  })
+  .strict();
 export type DlwatcherHealth = z.infer<typeof dlwatcherHealthSchema>;
 
 /** 追蹤清單總數上限（§3.2.4）。 */

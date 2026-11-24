@@ -13,43 +13,80 @@ export type IdOutcome = { status: 'found' | 'missing' | 'invalid' } | { status: 
 
 export type ProductBatchResult =
   | { kind: 'done'; outcomes: Map<string, IdOutcome> }
-  /** 429／5xx：退避後整批重試（§3.1）。 */
+  /** 429／5xx，或整批都被 4xx 拒絕：退避後整批重試（§3.1）。 */
   | { kind: 'retry'; reason: string }
-  /** 連不上：稍後整批重試，不計入退避。 */
+  /** 連不上（離線、逾時）：稍後整批重試，間隔隨連續次數加長。 */
   | { kind: 'network' }
   /** 回應無法解析等：這一輪跳過這批。 */
   | { kind: 'failed'; reason: string };
 
 const isRetryStatus = (status: number) => status === 429 || status >= 500;
 
-/**
- * 查一批作品的現價並寫回（§4.2：快照一次 set、priceLog 一個 transaction）。
- * 整批回傳 4xx（429 以外）時拆成兩半重試，找出壞的編號並記成查不到，不計入退避（§4.1）。
- * `beforeExtraRequest`：拆批後每多送一個請求之前呼叫（維持請求間隔）。
- */
-export async function checkProductBatch(batch: readonly string[], beforeExtraRequest: () => Promise<void>): Promise<ProductBatchResult> {
+/** §4.1：找壞編號時最多多送幾個請求（100 件裡有 1 個壞編號約 14 個）。 */
+export const MAX_SPLIT_REQUESTS = 16;
+
+type Fetched =
+  | { kind: 'ok'; found: Map<string, ProductInfo>; invalidIds: Set<string> }
+  | { kind: 'rejected'; status: number }
+  | { kind: 'other'; result: ProductBatchResult };
+
+async function fetchBatch(batch: readonly string[]): Promise<Fetched> {
   const res = await apiGet('productInfo', { ids: batch });
   if (!res.ok) {
-    if (res.kind === 'network') return { kind: 'network' };
-    if (res.kind === 'http' && isRetryStatus(res.status)) return { kind: 'retry', reason: `http${res.status}` };
-    if (res.kind === 'http' && res.status >= 400) {
-      if (batch.length === 1) return { kind: 'done', outcomes: await writeProductResults(batch, new Map(), new Set()) };
-      const mid = Math.ceil(batch.length / 2);
-      const outcomes = new Map<string, IdOutcome>();
-      for (const half of [batch.slice(0, mid), batch.slice(mid)]) {
-        await beforeExtraRequest();
-        const r = await checkProductBatch(half, beforeExtraRequest);
-        if (r.kind !== 'done') return r;
-        for (const [k, v] of r.outcomes) outcomes.set(k, v);
-      }
-      return { kind: 'done', outcomes };
-    }
-    return { kind: 'failed', reason: res.kind === 'http' ? `http${res.status}` : res.kind };
+    if (res.kind === 'network') return { kind: 'other', result: { kind: 'network' } };
+    if (res.kind === 'http' && isRetryStatus(res.status)) return { kind: 'other', result: { kind: 'retry', reason: `http${res.status}` } };
+    if (res.kind === 'http' && res.status >= 400) return { kind: 'rejected', status: res.status };
+    return { kind: 'other', result: { kind: 'failed', reason: res.kind === 'http' ? `http${res.status}` : res.kind } };
   }
   const parsed = parseProductInfoResponse(res.text, batch);
-  if (!parsed.ok) return { kind: 'failed', reason: parsed.reason };
-  const invalidIds = new Set(parsed.invalid.map((x) => x.id));
-  return { kind: 'done', outcomes: await writeProductResults(batch, parsed.found, invalidIds) };
+  if (!parsed.ok) return { kind: 'other', result: { kind: 'failed', reason: parsed.reason } };
+  return { kind: 'ok', found: parsed.found, invalidIds: new Set(parsed.invalid.map((x) => x.id)) };
+}
+
+/**
+ * 查一批作品的現價並寫回（§4.2：快照一次 set、priceLog 一個 transaction）。
+ * 整批回傳 4xx（429 以外）時，拆成兩半找壞的編號（§4.1）：只有「一半成功、一半被拒絕」才證明是某個編號的問題，
+ * 往被拒絕的那一半繼續拆，拆到剩一件就記成查不到。兩半都被拒絕、一開始就只有一件、或多送的請求超過上限，
+ * 都代表整批被擋（WAF、改版），當作 429／5xx 退避，不把作品記成查不到。
+ * `beforeExtraRequest`：每多送一個請求之前呼叫（維持請求間隔）。
+ */
+export async function checkProductBatch(batch: readonly string[], beforeExtraRequest: () => Promise<void>): Promise<ProductBatchResult> {
+  const first = await fetchBatch(batch);
+  if (first.kind === 'other') return first.result;
+  if (first.kind === 'ok') return { kind: 'done', outcomes: await writeProductResults(batch, first.found, first.invalidIds) };
+  const blocked: ProductBatchResult = { kind: 'retry', reason: `http${first.status}` };
+  if (batch.length === 1) return blocked;
+
+  const outcomes = new Map<string, IdOutcome>();
+  let budget = MAX_SPLIT_REQUESTS;
+  let suspects: readonly string[] = batch;
+  while (suspects.length > 1) {
+    if (budget < 2) return outcomes.size > 0 ? { kind: 'done', outcomes } : blocked;
+    const mid = Math.ceil(suspects.length / 2);
+    const halves = [suspects.slice(0, mid), suspects.slice(mid)];
+    const results: Fetched[] = [];
+    for (const half of halves) {
+      await beforeExtraRequest();
+      budget--;
+      const r = await fetchBatch(half);
+      if (r.kind === 'other') return r.result;
+      results.push(r);
+    }
+    const rejected = results.map((r) => r.kind === 'rejected');
+    if (rejected.every(Boolean)) return blocked;
+    // 成功的那一半（兩半都成功：剛才的 4xx 是偶發的）照常寫回
+    for (let i = 0; i < 2; i++) {
+      const r = results[i]!;
+      if (r.kind !== 'ok') continue;
+      for (const [k, v] of await writeProductResults(halves[i]!, r.found, r.invalidIds)) outcomes.set(k, v);
+    }
+    const bad = rejected.indexOf(true);
+    if (bad < 0) return { kind: 'done', outcomes };
+    suspects = halves[bad]!;
+  }
+  // 剩下的一件：另一半成功、它被拒絕，記成查不到（§5.3）
+  for (const [k, v] of await writeProductResults(suspects, new Map(), new Set())) outcomes.set(k, v);
+  return { kind: 'done', outcomes };
 }
 
 /** 查不到（API 沒回傳、is_sold_out）時累加連續次數，查得到就清掉（§5.3）。 */
@@ -120,8 +157,12 @@ export async function checkDlwatcherItem(id: string): Promise<DlwatcherOutcome> 
   const fetchedAt = nowIso();
   return writeQueue(async (): Promise<DlwatcherOutcome> => {
     if (!(await readItems()).has(id)) return { kind: 'rejected', reason: 'notTracked' }; // 查詢途中被移除
-    const [log, prev] = await Promise.all([readPriceLog(id), readHistory(id)]);
-    const failure = checkDlwatcherSanity(parsed.data, log, Date.now());
+    const [log, prev, snapshots] = await Promise.all([readPriceLog(id), readHistory(id), readSnapshots()]);
+    // §3.6：原價的參考值來自 DLsite（自己的紀錄與目前的快照），不能只信 DLWatcher 自己給的 regularPrice。
+    const officialPrices = log.map((e) => e.officialPrice);
+    const snap = snapshots.get(id);
+    if (snap) officialPrices.push(snap.officialPrice);
+    const failure = checkDlwatcherSanity(parsed.data, officialPrices, Date.now());
     if (failure) return { kind: 'rejected', reason: failure };
     await writeHistory(toHistoryRecord(parsed.data, fetchedAt, isDivergent(parsed.data, prev, log)));
     return { kind: 'saved' };

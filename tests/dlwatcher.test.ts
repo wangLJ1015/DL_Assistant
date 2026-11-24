@@ -11,7 +11,8 @@ const PRODUCT = readFileSync(resolve(import.meta.dirname, 'fixtures/product-info
 const apiGet = vi.fn();
 vi.mock('../src/lib/api/endpoints', () => ({ apiGet: (...args: unknown[]) => apiGet(...args) }));
 
-const { checkDlwatcherSanity, isDivergent, parseDlwatcherResponse, toHistoryRecord } = await import('../src/lib/api/dlwatcher');
+const { __regexForTest, checkDlwatcherSanity, isDivergent, parseDlwatcherResponse, toHistoryRecord } =
+  await import('../src/lib/api/dlwatcher');
 const { parseDlwatcherDate, curvePointDate } = await import('../src/lib/dates');
 const { readHistory, writeHistory } = await import('../src/lib/db');
 const { trackItem } = await import('../src/lib/tracking');
@@ -87,10 +88,20 @@ describe('§5.2 parseDlwatcherResponse (real response, 2026-11-23)', () => {
     }
   });
 
-  it('a "__proto__" year key does not pollute prototypes (§3.2.3)', () => {
-    const text = FIXTURE.replace('"2024":', '"__proto__":');
+  it.each(['__proto__', 'constructor', 'prototype'])('a %j year key is rejected and pollutes nothing (§3.2.3)', (key) => {
+    const text = FIXTURE.replace('"2024":', JSON.stringify(key) + ':');
     expect(parseDlwatcherResponse(text, 'RJ01014447').ok).toBe(false);
     expect(({} as Record<string, unknown>).points).toBeUndefined();
+  });
+
+  it('§3.2.6: its regexes finish quickly on 100k-character input', () => {
+    for (const re of Object.values(__regexForTest)) {
+      for (const input of ['1'.repeat(100_000), '-' + '1'.repeat(100_000) + '.', '1.' + '1'.repeat(100_000) + 'x']) {
+        const t = performance.now();
+        expect(re.test(input)).toBe(false);
+        expect(performance.now() - t).toBeLessThan(50);
+      }
+    }
   });
 
   it('accepts a missing lowest price (never discounted)', () => {
@@ -135,7 +146,27 @@ describe('§3.6 sanity check', () => {
     const d = parsed();
     d.lowest = { ...d.lowest!, price: 2200 };
     expect(checkDlwatcherSanity(d, [], NOW)).toBe('lowestTooHigh');
-    expect(checkDlwatcherSanity(d, [log(2200, 2200)], NOW)).toBeNull();
+    expect(checkDlwatcherSanity(d, [2200], NOW)).toBeNull();
+  });
+
+  it('judges the regular price against DLsite, not against DLWatcher itself (M3 review)', () => {
+    // 假資料：原價 ¥20、史低 ¥1。只看 DLWatcher 自己的 regularPrice 會通過
+    const fake = parsed();
+    fake.regularPrice = 20;
+    fake.lowest = { ...fake.lowest!, price: 1 };
+    fake.points = [];
+    expect(checkDlwatcherSanity(fake, [1980], NOW)).toBe('regularPriceMismatch');
+    // regularPrice 沒有被改，只有史低是假的：下限用 DLsite 的原價算
+    const lowOnly = parsed();
+    lowOnly.lowest = { ...lowOnly.lowest!, price: 1 };
+    lowOnly.regularPrice = 1000;
+    expect(checkDlwatcherSanity(lowOnly, [1980], NOW)).toBe('lowestTooLow');
+    // 原價調降（DLsite 現在 ¥1,650、以前 ¥1,980）不算不一致
+    expect(checkDlwatcherSanity(parsed(), [1650, 1980], NOW)).toBeNull();
+    // 差太多才算：DLWatcher 的原價超過 DLsite 的 2 倍
+    const high = parsed();
+    high.regularPrice = 5000;
+    expect(checkDlwatcherSanity(high, [1980], NOW)).toBe('regularPriceMismatch');
   });
 
   it('allows exactly floor(regular × 0.05)', () => {
@@ -203,12 +234,33 @@ describe('§3.6 keeps the previous history when the new response fails (M3 compl
     expect(await readHistory('RJ01014447')).toEqual(old());
   });
 
-  it('keeps the previous history on 404 and network errors too', async () => {
+  it.each([
+    ['404', { ok: false, kind: 'http', status: 404 }],
+    ['a network error', { ok: false, kind: 'network' }],
+    ['a 503', { ok: false, kind: 'http', status: 503 }],
+  ])('keeps the previous history on %s', async (_, response) => {
     await writeHistory(old());
-    dlwatcherResponse = { ok: false, kind: 'http', status: 404 };
+    dlwatcherResponse = response;
     await trackItem('RJ01014447', 'manual', { awaitPrice: true });
     await whenIdle();
+    expect(apiGet).toHaveBeenCalledWith('dlwatcher', { id: 'RJ01014447' });
     expect(await readHistory('RJ01014447')).toEqual(old());
+  });
+
+  it('rejects a fake ¥1 lowest for a newly tracked work, using the DLsite price (M3 review)', async () => {
+    dlwatcherResponse = {
+      ok: true,
+      status: 200,
+      text: mutate((j) => {
+        j.priceLogGraph.regularPrice = 20;
+        j.lowestPrice.priceInfo.price = 1;
+        j.priceLogGraph.graphs = {};
+      }),
+    };
+    await trackItem('RJ01014447', 'manual', { awaitPrice: true });
+    await whenIdle();
+    expect(apiGet).toHaveBeenCalledWith('dlwatcher', { id: 'RJ01014447' });
+    expect(await readHistory('RJ01014447')).toBeUndefined();
   });
 
   it('saves a valid response and records the request time (§3.1)', async () => {

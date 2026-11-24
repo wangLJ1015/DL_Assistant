@@ -1,6 +1,6 @@
 # DL_Assistant 專案規格書
 
-> 版本：v0.13（草案，M3 史低實作）　日期：2026-11-23
+> 版本：v0.14（草案，依 M3 審查修正）　日期：2026-11-24
 > 一句話說明：Chrome 擴充功能。把 DLsite 加入購物車的作品自動列入追蹤，定時查價、顯示史低與價格走勢，出現優惠時跳出通知；也能隨時查任一作品的史低，並依你手上的優惠券算出最划算的買法。
 >
 > 變更紀錄見 [CHANGELOG.md](CHANGELOG.md)。規格分成四個檔案，章節編號跨檔案沿用：
@@ -74,12 +74,12 @@
 
 ### 3.1 對外請求的節制
 - DLsite 商品 API 一次最多查 100 個作品 ID，請求之間間隔至少 1 秒。
-- DLWatcher 每個作品 24 小時內最多請求一次（對方回傳 `Cache-Control: max-age=86400`），請求之間間隔至少 2 秒。每件作品最近一次請求 DLWatcher 的時間存在 `chrome.storage.local` 的 `dlwatcherLastRequest`（只存編號與時間），追蹤查價與臨時查詢都先檢查它，瀏覽器重開也不會在 24 小時內重複請求。
+- DLWatcher 每個作品 23 小時內最多請求一次（對方回傳 `Cache-Control: max-age=86400`），請求之間間隔至少 2 秒。每件作品最近一次請求 DLWatcher 的時間存在 `chrome.storage.local` 的 `dlwatcherLastRequest`（只存編號與時間），追蹤查價與臨時查詢都先檢查它，瀏覽器重開也不會在 23 小時內重複請求。（v0.14：原本是 24 小時。定時查價每 6 或 24 小時一輪，一件作品在一輪裡可能晚幾十分鐘才輪到，用 24 小時的話下一輪會差一點點而被跳過，實際變成 30～48 小時才更新一次；留 1 小時的餘裕。請求時間記「送出的時候」。）
 - 商品 API 與 DLWatcher **只由 background 呼叫**，頻率限制、退避與快取才能集中管理（§3.4）。
 - 不自訂 User-Agent（瀏覽器不允許 fetch 改這個標頭，也不值得為此多要權限）。用頻率限制與快取節制流量。
-- 遇到 HTTP 429 或 5xx 就用指數退避（1 分、2 分、4 分），連續失敗 3 次就暫停該來源 6 小時，成功一次就清掉。退避狀態存在 `chrome.storage.local`，service worker 重啟後還記得（§4.1）。
-- 連不上（離線、逾時）不計入退避：1 分鐘後重試同一批（離線不代表對方有問題，計入的話斷網幾分鐘就會停 6 小時）。每個請求連同讀取回應最多等 30 秒（`apiGet` 的 `AbortSignal.timeout`），逾時當作連不上。
-- `dlwatcherLastRequest` 只在對方有正常回應時記錄（含 404、驗證失敗、不通過合理性檢查）；429、5xx、連不上不記錄，退避後要能重試。
+- 遇到 HTTP 429 或 5xx（以及商品 API 整批被 4xx 拒絕，§4.1）就用指數退避：依次在 1 分、2 分、4 分後重試，三次重試都失敗（連續第 4 次失敗）就暫停該來源 6 小時；成功一次就清掉。退避狀態存在 `chrome.storage.local`，service worker 重啟後還記得（§4.1）。（v0.13 寫「連續失敗 3 次就暫停」，4 分鐘那一步永遠用不到，v0.14 改成上面的說法。）
+- 連不上（離線、逾時、DNS 失敗、轉址）不計入上面的退避、也不會暫停來源（離線不代表對方有問題，計入的話斷網幾分鐘就會停 6 小時），但重試間隔隨連續次數加倍：1 分、2 分、4 分……最長 1 小時，對方有任何回應就歸零（`backoff.*.networkFailures`）。每個請求連同讀取回應最多等 30 秒（`apiGet` 的 `AbortSignal.timeout`），逾時當作連不上。
+- `dlwatcherLastRequest` 在對方有回應時記錄（含 404、驗證失敗、不通過合理性檢查），處理回應時自己這邊出錯（IndexedDB 寫入失敗等）也記錄；429、5xx、連不上不記錄，退避後要能重試。
 
 ### 3.2 安全
 完整規則見 [docs/security.md](docs/security.md)（§3.2.1～§3.2.6）。摘要：
@@ -126,13 +126,18 @@
   - 走勢圖改用 `priceLog` 畫階梯折線；沒有查價的期間（上一筆的 `lastSeenAt` 到下一筆的 `at`）畫成虛線，不假裝價格沒變。
   - 史低與通知基準只計算 `status` 為空的紀錄（排除「查不到」）。
   - 「開始追蹤」的日期用 `status` 為空的第一筆 `priceLog.at`，不用 `TrackedItem.addedAt`。
-- **DLWatcher 的歷史保留在本機**：`HistoryRecord` 只在新的回應驗證成功、而且通過下面的合理性檢查時才覆蓋；請求失敗、404、驗證失敗或檢查不通過時，保留上一次的資料並標示取得時間，不能用空資料或可疑資料蓋掉。保留下來的資料照常算進史低基準，畫面標示「DLWatcher 資料取得於 YYYY-MM-DD」；只有在設定裡關閉 DLWatcher 時才完全不用。
+- **DLWatcher 的歷史保留在本機**：`HistoryRecord` 只在新的回應驗證成功、而且通過下面的合理性檢查時才覆蓋；請求失敗、404、驗證失敗或檢查不通過時，保留上一次的資料並標示取得時間，不能用空資料或可疑資料蓋掉。保留下來的資料照常算進史低基準，畫面一律標示「DLWatcher 資料取得於 YYYY-MM-DD」（不只在資料舊的時候）；只有在設定裡關閉 DLWatcher 時才完全不用。
 - **DLWatcher 資料的合理性檢查**（防「格式正確但內容是假的」資料，例如網域換了持有者）：
-  - `lowest.price ≤ max(regularPrice, 自己紀錄裡見過的最大 officialPrice)`（原價可能調降過），而且 `lowest.price ≥ floor(regularPrice × 0.05)`。
+  - `regularPrice` 也是 DLWatcher 自己給的，不能單獨當基準（v0.14，M3 審查：假資料寫原價 ¥20、史低 ¥1 就能通過）。DLsite 給的原價（自己 `priceLog` 的 `officialPrice` 與目前快照的 `officialPrice`）有值時，`regularPrice` 必須在它們的最小值 × 0.5 到最大值 × 2 之間。
+  - 令 `參考原價 = max(regularPrice, DLsite 給過的最大 officialPrice)`（原價可能調降過）：`lowest.price ≤ 參考原價`，而且 `lowest.price ≥ floor(參考原價 × 0.05)`。
   - 史低與每一筆最近特價的期間都要 `start ≤ end`、`start ≤ 現在 + 1 天`、`end ≤ 現在 + 400 天`。走勢點的 `x`、`y` 都在 0～1。（M3 實測：進行中的特價，`end` 是 DLWatcher 最後一次看到這個價格的時間，不是未來的結束時間，§5.2；上限照樣保留 400 天。）
   - 新的 `lowest.price` 比上次低超過 50%，而且自己的 `priceLog` 沒有看過差距 5% 以內的價格時，標示「DLWatcher 資料與自己的紀錄差異很大」。
 - 畫面同時顯示「DLWatcher 史低」與「自己紀錄的最低價」兩個數字，不只顯示合併後的值。
-- DLWatcher 連續 7 天對所有作品都失敗或都不通過檢查時，自動暫停 DLWatcher，並通知「DLWatcher 似乎已停止服務，已改用自己的紀錄」；要你手動重新開啟。做法：任何一件成功就清掉 `dlwatcherHealth.allFailingSince`；失敗（驗證失敗、不通過檢查、429／5xx、其他 4xx）時沒有值就記下現在，距離它滿 7 天就設定 `Settings.dlwatcherAutoPausedAt` 並清空 DLWatcher 佇列。404 不算成功也不算失敗（冷門或太新的作品本來就查不到）。M3 先在 popup 顯示暫停提示與「重新開啟」（`resumeDlwatcher`），系統通知在 M4 和其他通知一起做。
+- DLWatcher 連續 7 天對所有作品都失敗或都不通過檢查時，自動暫停 DLWatcher，並通知「DLWatcher 似乎已停止服務，已改用自己的紀錄」；要你手動重新開啟。做法：
+  - 任何一件成功就清掉 `dlwatcherHealth`。
+  - 失敗（驗證失敗、不通過檢查、429／5xx、其他 4xx，以及**商品 API 同時連得上時**的 DLWatcher 連不上）時記下 `lastFailureAt`；`allFailingSince` 沒有值、或距離上一次失敗超過 2 天（中間沒有請求，例如瀏覽器關著，不能算「連續」）就從現在重新起算。距離 `allFailingSince` 滿 7 天就設定 `Settings.dlwatcherAutoPausedAt` 並清空 DLWatcher 佇列。
+  - 商品 API 也連不上（多半是自己離線）時，DLWatcher 連不上不算；網域失效或整站轉址（`redirect: 'error'` 會讓 fetch 失敗）時商品 API 照常，所以會算進去並在 7 天後自動暫停。
+  - 404 與處理時自己這邊出錯不算成功也不算失敗（冷門或太新的作品本來就查不到）。M3 先在 popup 顯示暫停提示與「重新開啟」（`resumeDlwatcher`），系統通知在 M4 和其他通知一起做。
 - 臨時查詢（F12、F13）的結果不寫進 `priceLog`。收到任何來源的 `track` 時，若 `lookupCache` 有這件作品而且未滿 24 小時，就用它寫第一筆 `priceLog` 與快照；否則照一般流程排進查價佇列。
 - F10 匯出包含 `priceLog`，換電腦或重裝時可以帶走自己的紀錄。
 - DOM 選擇器集中在 `selectors.ts`，改版時只要改一處。
@@ -192,15 +197,16 @@
 
 ### 4.1 背景工作
 MV3 service worker 閒置 30 秒會被終止，記憶體裡的狀態會消失。
-- 查價佇列存在 `chrome.storage.local`，兩個來源各自一條：`queues: { productInfo: { ids[], nextIndex, nextAt }, dlwatcher: { ids[], nextIndex, nextAt } }`，一個來源在退避時不會卡住另一個。每處理完一件（或一批）就把進度寫回 storage。
-- 每次被 alarm 喚醒最多處理 60 秒，還有剩就設一次性的 `drain` alarm（`delayInMinutes: 0.5`）繼續。service worker 被終止也能從 `nextIndex` 接著做。
+- 查價佇列存在 `chrome.storage.local`，兩個來源各自一條：`queues: { productInfo: { ids[], nextIndex, nextAt? }, dlwatcher: { ids[], nextIndex, nextAt? } }`，一個來源在退避時不會卡住另一個。每處理完一件（或一批）就把進度寫回 storage。
+- 每次喚醒最多處理 60 秒（處理途中又被叫到、再跑一次時沿用同一個期限，不重新計算），還有剩就把 `drain` alarm 設在下一次可以送請求的時間（至少 30 秒後）繼續；處理中的 `drain` alarm 見下方。service worker 被終止也能從 `nextIndex` 接著做。
+- 某一步處理時發生非預期的例外（IndexedDB 或 storage 寫入失敗等）：這一批（這一件）這一輪跳過，DLWatcher 照樣記下請求時間，不能讓 30 秒後的 `drain` alarm 重送同一個請求（v0.14，M3 審查重現了每 30 秒重送一次）。例外發生在處理步驟之外（例如讀不到佇列）時，`drain` alarm 改到 5 分鐘後。
 - 退避狀態（每個來源的連續失敗次數、暫停到何時）存在 `chrome.storage.local`。
-- 商品 API 若因為其中一個壞編號而整批回傳 4xx（行為見 §10.3），就把這批拆成兩半重試，找出壞的編號並記成 `unavailable`（§5.3），不計入退避。
+- 商品 API 整批回傳 4xx（429 以外）時，把這批拆成兩半各送一次，找出壞的編號：只有「一半成功、一半被拒絕」才證明是某個編號的問題，往被拒絕的那一半繼續拆，拆到剩一件就記成 `unavailable`（§5.3），成功的那一半照常寫回。兩半都被拒絕、一開始就只有一件、或多送的請求超過 16 個，都代表整批被擋（WAF、改版），整批照 429／5xx 退避，不把作品記成查不到。（M1 實測不存在的編號只會從回應裡消失、不會讓整批失敗，§10.3；唯一看過的 4xx 是 WAF 的 403。v0.13 對任何 4xx 都拆到底，整批被擋時 100 件會送出 199 個請求並把全部作品記成查不到，v0.14 依 M3 審查修正。）
 - 暫停追蹤的作品（`paused: true`）不放進查價佇列。
 - `runtime.onInstalled`、`runtime.onStartup`，以及 service worker 每次啟動時，都用 `chrome.alarms.get` 檢查排程是否存在，不在就重建（alarms 在瀏覽器重啟時可能被清除）。另外記錄 `lastRunAt`，啟動時若距離上次超過週期就立刻排一次。
 - 處理中每送出一步就把 `drain` alarm 設成 30 秒後（chrome.alarms 的最短間隔），像「沒人按就會響」的開關：service worker 在某一步中途被終止時，30 秒後由 alarm 叫醒接著做。alarm 在處理途中觸發時（一步等很久），再設一次。佇列清空時清掉 `drain`。（M3 實測：處理到第 3/10 件時用 `stopAllWorkers` 終止，42 秒後做完，每件只請求一次。）
 - 佇列的寫法：`ids` 是待處理的作品，`nextIndex` 之前的已完成。新加入追蹤、按「重新查價」的作品排到最前面（同時把已完成的部分清掉、`nextIndex` 歸零）；處理完一步時，佇列沒被改過就把 `nextIndex` 往後移，被改過就把做完的作品從剩下的裡面拿掉。`nextAt` 是這個來源下一次可以送請求的時間（請求間隔、退避都寫在這裡）。
-- 一輪查價（`check` alarm，週期是 `checkIntervalHours`）：所有沒有暫停的追蹤作品排進 `productInfo`；DLWatcher 使用中時，24 小時內沒請求過的排進 `dlwatcher`。`check` alarm 與 `lastRunAt` 在 M3 就實作（`priceLog` 要有定時查價才累積得起來）；M4 在同一個流程加上通知規則。
+- 一輪查價（`check` alarm，週期是 `checkIntervalHours`）：所有沒有暫停的追蹤作品排進 `productInfo`；DLWatcher 使用中時，23 小時內沒請求過的排進 `dlwatcher`。`check` alarm 與 `lastRunAt` 在 M3 就實作（`priceLog` 要有定時查價才累積得起來）；M4 在同一個流程加上通知規則。
 - 所有事件監聽器（`alarms.onAlarm`、`runtime.onMessage`、`contextMenus.onClicked`、`notifications.onClicked`）都在 `background.ts` 最上層同步註冊。
 - 右鍵選單在 `runtime.onInstalled` 先 `chrome.contextMenus.removeAll()` 再 `create`，不在 service worker 每次啟動時建立（重複的 `id` 會出錯）。
 
@@ -212,7 +218,7 @@ MV3 service worker 閒置 30 秒會被終止，記憶體裡的狀態會消失。
 - IndexedDB 連線處理 `versionchange` 事件：收到就關閉連線並提示重新整理頁面。
 - 同步鎖與 `syncToken` 的「讀取、判斷、寫入」也放在同一個 Promise 佇列裡執行，兩個分頁同時送 `shouldSyncCoupons` 時只有一個拿到 token。
 - **寫入與通知的先後**：以 §4.1 的一批（商品 API 一次最多 100 件）為單位。整批每件作品依 §6.1 處理完後，用**一次** `chrome.storage.local.set({...})` 寫入 `snapshots`、`ruleState`、`notified`、`recentNotifications`，`priceLog` 用一個 IndexedDB transaction 寫入，然後才把這批的候選合併成一則通知並呼叫 `chrome.notifications.create`。service worker 若在中間被終止，寧可漏發也不重複發；漏發的通知仍在「最近的通知」看得到。跨批次不合併（一輪查價最多 10 批，可能出現多則通知）。（每件各寫一次的話，1,000 件要序列化 1,000 次整份資料；一次 `set` 寫多個 key 是否不可分割，見 §10.3。）
-- **清理**：移除追蹤時刪掉該作品的 `RuleState`、`snapshots`（`priceLog` 與 `history` 保留，重新追蹤時還能用；`history` 有 `dlwatcherLastRequest` 擋著，24 小時內重新追蹤不會再請求）；每次同步優惠券後，刪掉已不存在的 `coupon.key` 的 `RuleState` 與 `Settings.reservedCouponKeys`。
+- **清理**：移除追蹤時刪掉該作品的 `RuleState`、`snapshots`（`priceLog` 與 `history` 保留，重新追蹤時還能用；`history` 有 `dlwatcherLastRequest` 擋著，23 小時內重新追蹤不會再請求）；每次同步優惠券後，刪掉已不存在的 `coupon.key` 的 `RuleState` 與 `Settings.reservedCouponKeys`。
 
 ---
 
@@ -285,9 +291,9 @@ GET https://dlwatcher.com/product/{作品編號}.json
 | `notified` | `storage.local` | `NotifiedKey[]` | 否 |
 | `recentNotifications` | `storage.local` | `RecentNotification[]`（最多 50 則） | 否 |
 | `queues` | `storage.local` | §4.1 的查價佇列 | 否 |
-| `backoff` | `storage.local` | `{ productInfo, dlwatcher }` 各自的 `{ failures: number; pausedUntil?: string }` | 否 |
+| `backoff` | `storage.local` | `{ productInfo, dlwatcher }` 各自的 `{ failures: number; pausedUntil?: string; networkFailures?: number }`（§3.1） | 否 |
 | `lastRunAt` | `storage.local` | `string` | 否 |
-| `dlwatcherHealth` | `storage.local` | `{ allFailingSince?: string }`（§3.6 的 7 天自動暫停） | 否 |
+| `dlwatcherHealth` | `storage.local` | `{ allFailingSince?: string; lastFailureAt?: string }`（§3.6 的 7 天自動暫停） | 否 |
 | `dlwatcherLastRequest` | `storage.local` | `[id, at][]`（§3.1） | 否 |
 | `dailyAutoAdd` | `storage.local` | `{ date: string; count: number; skipped: number }`（§3.2.4 每日上限；`date` 是 JST 日期，`skipped` 是今天因為上限沒有加入的件數，popup 提示用） | 否 |
 | `lastCart` | `storage.local` | `{ ids: string[]; at: string }`（最近一次 `cartSnapshot`，F15「從購物車選擇」用） | 否 |
@@ -364,7 +370,7 @@ interface HistoryRecord {
   lowest: { price: number; start: string; end: string } | null;
   sales: { price: number; rate: number; start: string; end: string }[];
   curve: { date: string; ratio: number }[];   // 由 priceLogGraph 換算
-  regularPrice: number;    // priceLogGraph.regularPrice，合理性檢查與走勢換算用
+  regularPrice: number;    // priceLogGraph.regularPrice，走勢換算用；它也是 DLWatcher 給的，合理性檢查要和 DLsite 的原價比對（§3.6）
   discountDaysLastYear?: number;
   saleCount?: number;      // ebmInput.sale_count，儀表板顯示「累計打折 N 次」
   divergent?: true;        // §3.6：新的史低比上次低超過 50%，而且自己的紀錄沒看過相近的價格；史低沒變時沿用上次的標示
@@ -710,7 +716,7 @@ DL_Assistant/
 |---|---|---|
 | M1 骨架（✅ 2026-11-23，v0.9 依審查修正；Chrome 120 實測待補，見 §10.3） | WXT 專案、`zod-setup.ts`、ESLint 規則與 `tests/lint-fixtures/`、`apiGet` 與白名單、`nav.ts` 與連結元件、`Settings` 與 storage 存取層、background 呼叫商品 API 查價、手動加入追蹤（`track` 訊息） | 在 popup 手動加一個作品，看得到現價；`assertAllowed` 行為測試、lint 自我測試、`isWorkId`／`buildWorkUrl`／`intIn`／商品 API 的 `"__proto__"` key 測試通過；manifest 檢查腳本通過；CSP 與 `minimum_chrome_version` 被 Chrome 接受；`setAccessLevel` 生效（content script 呼叫 `chrome.storage.local.get` 會失敗）；§3.4 自我測試表的每個範例都以指定的規則報錯 |
 | M2 自動追蹤（✅ 2026-11-23，v0.11 依審查修正；以照實測結構寫的假頁面驗證，真實 DLsite 與登入狀態的端到端未測） | content script（原生 DOM、import 白名單）偵測加入購物車、購物車 DOM 同步、訊息白名單與來源檢查 | 在 DLsite 加入購物車後，追蹤清單自動多一筆；非 `isTrusted` 的點擊不會加入；content script 打包檔不含 `react`、`storage.local`；content script 的 DOM lint 範例都報錯；content script 的 `track` 計入每日上限；訊息來源的拒絕案例與 `setSettings` 多餘欄位被拒絕的測試通過 |
-| M3 史低（✅ 2026-11-23；走勢圖本身在 M5 畫，M3 完成的是走勢資料 `buildTrend()` 與它的測試；popup 顯示史低與 DLWatcher 開關） | DLWatcher 串接、歷史資料存 IndexedDB、自己的 `priceLog`、合理性檢查、查價佇列與退避、定時查價（`check` alarm） | 每個追蹤作品都有史低和期間；在設定關閉 DLWatcher 後，史低與走勢改用自己的紀錄；查價途中 service worker 被終止，重啟後能接著做；「可買 → 查不到 ×3 → 可買（同價）」得到 3 筆紀錄；「關瀏覽器 3 天、前後同價」得到 2 筆紀錄，中間畫虛線；DLWatcher 合理性檢查的 4 個不通過案例（`lowest` 過高、過低、`start > end`、走勢點超出 0～1）都保留舊資料 |
+| M3 史低（✅ 2026-11-23，v0.14 依審查修正；走勢圖本身在 M5 畫，M3 完成的是走勢資料 `buildTrend()` 與它的測試；popup 顯示史低與 DLWatcher 開關） | DLWatcher 串接、歷史資料存 IndexedDB、自己的 `priceLog`、合理性檢查、查價佇列與退避、定時查價（`check` alarm） | 每個追蹤作品都有史低和期間；在設定關閉 DLWatcher 後，史低與走勢改用自己的紀錄；查價途中 service worker 被終止，重啟後能接著做；「可買 → 查不到 ×3 → 可買（同價）」得到 3 筆紀錄；「關瀏覽器 3 天、前後同價」得到 2 筆紀錄，中間畫虛線；DLWatcher 合理性檢查的 4 個不通過案例（`lowest` 過高、過低、`start > end`、走勢點超出 0～1）都保留舊資料 |
 | M4 通知 | §6.1 的處理步驟（接在 M3 的查價流程上）、去重、一批一次寫入、DLWatcher 自動暫停的系統通知（§3.6） | 作品打折時收到一次通知；回到原價後再次打折會再通知；§6.1 列出的所有測試情境通過（含查不到一次不重發、一批多件合併成一則、暫停恢復） |
 | M5 儀表板 | 表格、走勢圖、等待建議、最近的通知 | 一頁看完所有追蹤作品的價格狀況；`dashboard.html?n=` 帶不存在的 ID 時不篩選、不報錯 |
 | M6 作品頁徽章與臨時查詢 | 作品頁史低徽章、「查史低」按鈕、popup 查詢、右鍵選單與 `lookup.html` | 未追蹤的作品也查得到史低，而且追蹤清單沒有多出東西；開啟 10 個作品頁（含未追蹤），開發者工具的網路面板裡擴充功能沒有發出任何請求 |

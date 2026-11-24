@@ -14,8 +14,8 @@ import {
   type TrackedItem,
 } from '../../lib/models';
 import { isOnSale } from '../../lib/rules';
-import { isoToMs, jstDate, localDate, nowIso } from '../../lib/dates';
-import { readAllHistory, readAllPriceLogs } from '../../lib/db';
+import { jstDate, localDate, nowIso } from '../../lib/dates';
+import { onDbVersionChange, readAllHistory, readAllPriceLogs } from '../../lib/db';
 import { summarizeLowest } from '../../lib/history';
 import { readDailyAutoAdd, readItems, readSettings, readSnapshots, readStorageLock, STORAGE_KEYS } from '../../lib/storage';
 
@@ -40,11 +40,15 @@ const WATCHED_KEYS = [
 ] as const;
 
 /** 擴充功能頁面直接讀 storage，並用 onChanged 更新（§4.2）。 */
-function useTrackedData(): Data | null {
+function useTrackedData(): { data: Data | null; dbOutdated: boolean } {
   const [data, setData] = useState<Data | null>(null);
+  const [dbOutdated, setDbOutdated] = useState(false);
   useEffect(() => {
     let alive = true;
+    // 讀取可能晚到：只採用最新一次的結果（M3 審查：舊的結果不能蓋掉新的）
+    let seq = 0;
     const load = async () => {
+      const mine = ++seq;
       const [items, snapshots, settings, daily, histories, logs] = await Promise.all([
         readItems(),
         readSnapshots(),
@@ -53,7 +57,7 @@ function useTrackedData(): Data | null {
         readAllHistory().catch(() => new Map<string, HistoryRecord>()),
         readAllPriceLogs().catch(() => new Map<string, PriceLogEntry[]>()),
       ]);
-      if (alive)
+      if (alive && mine === seq)
         setData({
           items: [...items.values()].sort((a, b) => b.addedAt.localeCompare(a.addedAt)),
           snapshots,
@@ -68,12 +72,15 @@ function useTrackedData(): Data | null {
       if (area === 'local' && WATCHED_KEYS.some((k) => k in changes)) void load();
     };
     browser.storage.onChanged.addListener(onChanged);
+    // §4.2：資料庫被新版本升級時關閉連線，提示重新開啟
+    const offDb = onDbVersionChange(() => setDbOutdated(true));
     return () => {
       alive = false;
       browser.storage.onChanged.removeListener(onChanged);
+      offDb();
     };
   }, []);
-  return data;
+  return { data, dbOutdated };
 }
 
 async function send(msg: ExtMessage): Promise<WriteReply> {
@@ -99,6 +106,7 @@ const REASON_TEXT: Record<string, string> = {
   queued: '已排入查價佇列，稍後會自動查價',
   backoff: 'DLsite 暫時無法連線，稍後會自動重試',
   notTracked: '這個作品不在追蹤清單裡',
+  paused: '這個作品已暫停追蹤',
 };
 const reasonText = (reason: string) =>
   REASON_TEXT[reason] ?? (/^http\d+$/.test(reason) ? `DLsite 回應錯誤（${reason.slice(4)}）` : REASON_TEXT.failed);
@@ -117,9 +125,6 @@ function useStorageLockFailed(): boolean {
 
 const yen = (n: number) => `¥${n.toLocaleString('ja-JP')}`;
 
-/** DLWatcher 的資料超過這個時間沒更新，就標示取得日期（§3.6）。 */
-const STALE_HISTORY_MS = 2 * 24 * 60 * 60 * 1000;
-
 /** 史低：DLWatcher 與自己的紀錄兩個數字並列（§3.6）。 */
 function LowestCell({ id, data }: { id: string; data: Data }) {
   const s = summarizeLowest(data.histories.get(id), data.logs.get(id) ?? [], data.settings);
@@ -130,9 +135,10 @@ function LowestCell({ id, data }: { id: string; data: Data }) {
         <div data-testid="lowest-dlwatcher">
           史低 <span className="font-bold text-gray-900">{yen(s.dlwatcher.price)}</span>（{localDate(s.dlwatcher.start)}〜
           {localDate(s.dlwatcher.end)}）<span className="text-gray-400">DLWatcher</span>
-          {Date.now() - isoToMs(s.dlwatcher.fetchedAt) > STALE_HISTORY_MS && (
-            <span className="ml-1 text-gray-400">資料取得於 {localDate(s.dlwatcher.fetchedAt)}</span>
-          )}
+          {/* §3.6：保留下來的資料要看得出是什麼時候取得的，一律標示 */}
+          <span className="ml-1 text-gray-400" data-testid="lowest-fetched">
+            資料取得於 {localDate(s.dlwatcher.fetchedAt)}
+          </span>
           {s.dlwatcher.divergent && <span className="ml-1 text-amber-700">DLWatcher 資料與自己的紀錄差異很大</span>}
         </div>
       )}
@@ -237,7 +243,7 @@ function PriceCell({ item, snap, checking, error, onRecheck }: PriceCellProps) {
 }
 
 export function App() {
-  const data = useTrackedData();
+  const { data, dbOutdated } = useTrackedData();
   const [input, setInput] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -283,6 +289,11 @@ export function App() {
   return (
     <main className="w-[380px] p-3 text-sm text-gray-900">
       <h1 className="mb-2 text-base font-bold">DL_Assistant</h1>
+      {dbOutdated && (
+        <p role="alert" className="mb-2 rounded bg-amber-100 px-2 py-1 text-amber-900">
+          擴充功能已更新，請關閉這個視窗再重新開啟。
+        </p>
+      )}
       {lockFailed && (
         <p role="alert" className="mb-2 rounded bg-amber-100 px-2 py-1 text-amber-900">
           這個 Chrome 版本無法限制網頁程式讀取擴充功能的資料。請更新 Chrome。

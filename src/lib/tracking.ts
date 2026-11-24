@@ -103,12 +103,14 @@ export async function refreshPrices(ids: readonly string[]): Promise<RefreshResu
 }
 
 /**
- * `recheck {ids}`（§3.2.4）：ids 都必須在追蹤清單裡；同一件作品 10 分鐘內只重新查價一次。
+ * `recheck {ids}`（§3.2.4）：ids 都必須在追蹤清單裡，而且沒有暫停；同一件作品 10 分鐘內只重新查價一次。
+ * 這次沒有真的送出請求（排隊中、退避中）時把冷卻還回去，使用者稍後可以再按。
  */
 export async function recheck(ids: readonly string[]): Promise<WriteReply> {
-  const due = await writeQueue(async (): Promise<string[] | WriteReply> => {
+  const due = await writeQueue(async (): Promise<{ id: string; at: string }[] | WriteReply> => {
     const [items, recheckAt] = await Promise.all([readItems(), readRecheckAt()]);
     if (!ids.every((id) => items.has(id))) return { ok: false, reason: 'notTracked' };
+    if (ids.some((id) => items.get(id)?.paused)) return { ok: false, reason: 'paused' };
     const now = Date.now();
     const due = [...new Set(ids)].filter((id) => {
       const last = recheckAt.get(id);
@@ -121,10 +123,17 @@ export async function recheck(ids: readonly string[]): Promise<WriteReply> {
       recheckAt.set(id, at);
     }
     await writeStore({ recheckAt });
-    return due;
+    return due.map((id) => ({ id, at }));
   });
   if (!Array.isArray(due)) return due;
-  const r = await refreshPrices(due);
+  const r = await refreshPrices(due.map((d) => d.id));
+  if (!r.ok && (r.reason === 'queued' || r.reason === 'backoff')) {
+    await writeQueue(async () => {
+      const recheckAt = await readRecheckAt();
+      for (const d of due) if (recheckAt.get(d.id) === d.at) recheckAt.delete(d.id);
+      await writeStore({ recheckAt });
+    });
+  }
   if (!r.ok) return r;
   return r.invalid > 0 ? { ok: false, reason: 'invalidData' } : { ok: true };
 }
@@ -141,7 +150,7 @@ export async function updateSettings(partial: Partial<Settings>): Promise<WriteR
   });
   // §3.2.4：改查價週期時重建 alarm。
   if (after.checkIntervalHours !== before.checkIntervalHours) await rescheduleCheck(after);
-  // 重新開啟 DLWatcher：補查 24 小時內沒請求過的作品（關閉時佇列由 queue.ts 清掉）。
+  // 重新開啟 DLWatcher：補查 23 小時內沒請求過的作品（關閉時佇列由 queue.ts 清掉）。
   if (after.dlwatcherEnabled && !before.dlwatcherEnabled) await refillDlwatcher();
   return { ok: true };
 }

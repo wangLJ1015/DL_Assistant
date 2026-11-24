@@ -4,7 +4,7 @@
 //
 // 商品 API 與 DLWatcher 全部由 CDP 回應假的資料（DLWatcher 用 tests/fixtures 的實測回應改編號），
 // 不發出任何對外請求。最後一項（一直不回應的請求）不附加到 service worker（附加 CDP 會讓它不被終止），
-// 改在瀏覽器層級攔截；攔截不到時那一項記為未確認。
+// 改在瀏覽器層級攔截；攔截不到時那一項算失敗。
 // 環境變數：CHROME_PATH、HEADLESS=0（同 verify-m1.ts）。
 import { spawn } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -278,7 +278,8 @@ async function main() {
     await send({ type: 'track', id: held, from: 'manual' });
     const heldSeen = await poll(async () => (dlwRequests.includes(held) ? true : undefined), 20_000, 'held request').catch(() => false);
     if (!heldSeen) {
-      note('一直不回應的請求', '瀏覽器層級攔截不到 service worker 的請求，這一項未確認（沒有送出真的請求）');
+      // 攔截不到就不算通過（M3 審查：只印提示的話，這一項可能什麼都沒測就顯示成功）
+      record('DLWatcher 一直不回應時 30 秒後放棄，稍後重試並存好（§4.1）', false, '瀏覽器層級攔截不到 service worker 的請求，沒有測到');
     } else {
       const saved = await poll(
         async () => ((await histories()).some((h) => h.id === held) ? Date.now() : undefined),

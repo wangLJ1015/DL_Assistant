@@ -83,7 +83,7 @@ describe('§4.1 queues', () => {
     expect(await fakeBrowser.alarms.get(ALARM_DRAIN)).toBeUndefined();
   });
 
-  it('DLWatcher is requested at most once per work in 24 hours, also across a new run (§3.1)', async () => {
+  it('DLWatcher is requested at most once per work in 23 hours, also across a new run (§3.1)', async () => {
     await seed(ids(3));
     await queue.startRun();
     await whenIdle();
@@ -91,13 +91,33 @@ describe('§4.1 queues', () => {
     await whenIdle();
     expect(calls('dlwatcher')).toHaveLength(3);
     expect(calls('productInfo')).toHaveLength(2);
-    // 25 小時前的紀錄就可以再請求
     const last = await readDlwatcherLastRequest();
-    last.set('RJ00000001', new Date(Date.now() - 25 * 60 * MIN).toISOString());
+    // 22 小時前：還不行；23 小時又 1 分鐘前：可以（下一輪 24 小時後的查價不會差幾分鐘被跳過，M3 審查）
+    last.set('RJ00000001', new Date(Date.now() - 22 * 60 * MIN).toISOString());
+    last.set('RJ00000002', new Date(Date.now() - 23 * 60 * MIN - MIN).toISOString());
     await writeStore({ dlwatcherLastRequest: last });
     await queue.startRun();
     await whenIdle();
-    expect(calls('dlwatcher')).toHaveLength(4);
+    expect(
+      calls('dlwatcher')
+        .slice(3)
+        .map(([, p]) => (p as { id: string }).id),
+    ).toEqual(['RJ00000002']);
+  });
+
+  it('records the DLWatcher request time when it was sent, not when the answer came back', async () => {
+    await seed(ids(1));
+    let sentAt = 0;
+    apiGet.mockImplementation(async (key: string, p: { ids?: string[]; id?: string }) => {
+      if (key === 'productInfo') return { ok: true, status: 200, text: productFor(p.ids!) };
+      sentAt = Date.now();
+      await new Promise((r) => setTimeout(r, 50));
+      return { ok: true, status: 200, text: dlwFor(p.id!) };
+    });
+    await queue.startRun();
+    await whenIdle();
+    const at = Date.parse((await readDlwatcherLastRequest()).get('RJ00000001')!);
+    expect(at).toBeLessThanOrEqual(sentAt);
   });
 
   it('resumes from the stored progress after the service worker stops mid-run (M3 completion)', async () => {
@@ -155,8 +175,20 @@ describe('§4.1 queues', () => {
   });
 });
 
+/** 清掉這個來源的 nextAt（模擬時間過去），再處理一次。 */
+async function clearNextAtAndKick(source: 'productInfo' | 'dlwatcher' = 'productInfo') {
+  const qs = await readQueues();
+  const { nextAt: _, ...rest } = qs[source];
+  await writeStore({ queues: { ...qs, [source]: rest } });
+  const t = Date.now();
+  await kick();
+  return t;
+}
+const waitOf = async (t: number, source: 'productInfo' | 'dlwatcher' = 'productInfo') =>
+  Date.parse((await readQueues())[source].nextAt!) - t;
+
 describe('§3.1 backoff', () => {
-  it('429／5xx back off 1, 2, 4 minutes, then pause the source for 6 hours; DLWatcher keeps going', async () => {
+  it('429／5xx retry after 1, 2 and 4 minutes, then pause the source for 6 hours; DLWatcher keeps going', async () => {
     await seed(ids(2));
     apiGet.mockImplementation(async (key: string, p: { id?: string }) =>
       key === 'productInfo' ? { ok: false, kind: 'http', status: 503 } : { ok: true, status: 200, text: dlwFor(p.id!) },
@@ -164,73 +196,154 @@ describe('§3.1 backoff', () => {
     const t0 = Date.now();
     await queue.startRun();
     await whenIdle();
-    let q = await readQueues();
     expect((await readBackoff()).productInfo).toEqual({ failures: 1 });
-    expect(Date.parse(q.productInfo.nextAt!) - t0).toBeGreaterThanOrEqual(MIN);
+    expect(await waitOf(t0)).toBeGreaterThanOrEqual(MIN);
     // 一個來源在退避時不會卡住另一個（§4.1）
     expect(calls('dlwatcher')).toHaveLength(2);
-    const expectWait = async (failures: number, waitMs: number) => {
-      const qs = await readQueues();
-      const { nextAt: _, ...rest } = qs.productInfo;
-      await writeStore({ queues: { ...qs, productInfo: rest } });
-      const t = Date.now();
-      await kick();
-      q = await readQueues();
-      const b = await readBackoff();
-      if (failures > 0) {
-        expect(b.productInfo).toEqual({ failures });
-        expect(Date.parse(q.productInfo.nextAt!) - t).toBeGreaterThanOrEqual(waitMs);
-      }
-      return b;
-    };
-    await expectWait(2, 2 * MIN);
-    const b = await expectWait(0, 0);
+    let t = await clearNextAtAndKick();
+    expect((await readBackoff()).productInfo).toEqual({ failures: 2 });
+    expect(await waitOf(t)).toBeGreaterThanOrEqual(2 * MIN);
+    t = await clearNextAtAndKick();
+    expect((await readBackoff()).productInfo).toEqual({ failures: 3 });
+    expect(await waitOf(t)).toBeGreaterThanOrEqual(4 * MIN);
+    // 三次重試都失敗：暫停 6 小時
+    await clearNextAtAndKick();
+    const b = await readBackoff();
     expect(b.productInfo.failures).toBe(0);
     expect(Date.parse(b.productInfo.pausedUntil!) - Date.now()).toBeGreaterThan(5.9 * 60 * MIN);
+    expect(calls('productInfo')).toHaveLength(4);
     // 暫停中：不再請求
-    const before = calls('productInfo').length;
-    await expectWait(0, 0);
-    expect(calls('productInfo')).toHaveLength(before);
+    await clearNextAtAndKick();
+    expect(calls('productInfo')).toHaveLength(4);
     expect((await readQueues()).productInfo.ids).toEqual(ids(2));
     // 成功一次就清掉退避
-    await writeStore({ backoff: { productInfo: { failures: 2 }, dlwatcher: { failures: 0 } } });
+    await writeStore({ backoff: { productInfo: { failures: 2, networkFailures: 3 }, dlwatcher: { failures: 0 } } });
     apiGet.mockImplementation(async (_k: string, p: { ids: string[] }) => ({ ok: true, status: 200, text: productFor(p.ids) }));
-    const qs = await readQueues();
-    const { nextAt: _n, ...rest } = qs.productInfo;
-    await writeStore({ queues: { ...qs, productInfo: rest } });
-    await kick();
+    await clearNextAtAndKick();
     expect((await readBackoff()).productInfo).toEqual({ failures: 0 });
     expect((await readQueues()).productInfo.ids).toEqual([]);
   });
 
-  it('a recheck during backoff replies "backoff" without sending a request', async () => {
+  it('network failures retry the same batch with a doubling delay (1 minute up to 1 hour) and never pause', async () => {
+    await seed(ids(1));
+    apiGet.mockImplementation(async (key: string) =>
+      key === 'productInfo' ? { ok: false, kind: 'network' } : { ok: false, kind: 'http', status: 404 },
+    );
+    let t = Date.now();
+    await queue.startRun();
+    await whenIdle();
+    const waits: number[] = [await waitOf(t)];
+    for (let i = 0; i < 7; i++) {
+      t = await clearNextAtAndKick();
+      waits.push(await waitOf(t));
+    }
+    expect(waits.map((w) => Math.round(w / MIN))).toEqual([1, 2, 4, 8, 16, 32, 60, 60]);
+    const b = (await readBackoff()).productInfo;
+    expect(b).toEqual({ failures: 0, networkFailures: 8 });
+    expect((await readQueues()).productInfo.ids).toEqual(ids(1));
+    expect(calls('productInfo')).toHaveLength(8);
+  });
+
+  it('a recheck during backoff replies "backoff" without sending a request, and does not use up the cooldown', async () => {
     await seed(ids(1));
     await writeStore({
       backoff: { productInfo: { failures: 0, pausedUntil: new Date(Date.now() + 60 * MIN).toISOString() }, dlwatcher: { failures: 0 } },
     });
     expect(await tracking.recheck(['RJ00000001'])).toEqual({ ok: false, reason: 'backoff' });
+    expect(await tracking.recheck(['RJ00000001'])).toEqual({ ok: false, reason: 'backoff' });
     expect(calls('productInfo')).toHaveLength(0);
   });
 
   it('splits a batch rejected with 4xx and marks only the bad id as not found (§4.1)', async () => {
-    const all = ids(5);
+    const all = ids(100);
     await seed(all);
     apiGet.mockImplementation(async (key: string, p: { ids?: string[] }) => {
       if (key !== 'productInfo') return { ok: false, kind: 'http', status: 404 };
-      return p.ids!.includes('RJ00000004') ? { ok: false, kind: 'http', status: 400 } : { ok: true, status: 200, text: productFor(p.ids!) };
+      return p.ids!.includes('RJ00000042') ? { ok: false, kind: 'http', status: 400 } : { ok: true, status: 200, text: productFor(p.ids!) };
     });
-    expect(await tracking.refreshPrices(all)).toEqual({ ok: true, updated: 4, missing: 1, invalid: 0 });
+    expect(await tracking.refreshPrices(all)).toEqual({ ok: true, updated: 99, missing: 1, invalid: 0 });
     const items = await readItems();
-    expect(items.get('RJ00000004')!.notFoundCount).toBe(1);
-    expect(items.get('RJ00000003')!.notFoundCount).toBeUndefined();
+    expect(items.get('RJ00000042')!.notFoundCount).toBe(1);
+    expect(items.get('RJ00000041')!.notFoundCount).toBeUndefined();
     expect((await readBackoff()).productInfo.failures).toBe(0);
+    // 1 + 每一層 2 個（100 → 50 → 25 → 13 → 7 → 4 → 2 → 1）
+    expect(calls('productInfo').length).toBeLessThanOrEqual(1 + 2 * 7);
+  });
+
+  it('a whole batch rejected with 4xx (WAF, API change) backs off instead of marking every work not found (M3 review)', async () => {
+    const all = ids(100);
+    await seed(all);
+    apiGet.mockImplementation(async (key: string) =>
+      key === 'productInfo' ? { ok: false, kind: 'http', status: 403 } : { ok: false, kind: 'http', status: 404 },
+    );
+    expect(await tracking.refreshPrices(all)).toEqual({ ok: false, reason: 'http403' });
+    // 第一個請求＋拆一次的兩半，兩半都被拒絕就停
+    expect(calls('productInfo')).toHaveLength(3);
+    expect((await readBackoff()).productInfo).toEqual({ failures: 1 });
+    const items = await readItems();
+    expect([...items.values()].some((i) => i.notFoundCount !== undefined)).toBe(false);
+    expect((await readSnapshots()).size).toBe(0);
+    expect((await readQueues()).productInfo.ids).toHaveLength(100);
+  });
+
+  it('a single-work batch rejected with 4xx backs off too (a block cannot be told apart from a bad id)', async () => {
+    await seed(ids(1));
+    apiGet.mockImplementation(async (key: string) =>
+      key === 'productInfo' ? { ok: false, kind: 'http', status: 403 } : { ok: false, kind: 'http', status: 404 },
+    );
+    expect(await tracking.refreshPrices(ids(1))).toEqual({ ok: false, reason: 'http403' });
+    expect((await readItems()).get('RJ00000001')!.notFoundCount).toBeUndefined();
+    expect((await readBackoff()).productInfo.failures).toBe(1);
+  });
+});
+
+describe('unexpected errors in a step (M3 review)', () => {
+  const brokenIndexedDb = async () => {
+    const { __closeDbForTest } = await import('../src/lib/db');
+    await __closeDbForTest();
+    globalThis.indexedDB = {
+      open: () => {
+        throw new Error('IndexedDB is broken');
+      },
+    } as unknown as IDBFactory;
+  };
+
+  it('a failing IndexedDB write does not make DLWatcher get re-requested every 30 seconds', async () => {
+    await seed(ids(1));
+    await writeStore({ lastRunAt: new Date().toISOString() });
+    await brokenIndexedDb();
+    await queue.enqueue('dlwatcher', ids(1));
+    for (let i = 0; i < 3; i++) {
+      await handleAlarm(ALARM_DRAIN);
+      await whenIdle();
+    }
+    expect(calls('dlwatcher')).toHaveLength(1);
+    expect((await readQueues()).dlwatcher.ids).toEqual([]);
+    expect((await readDlwatcherLastRequest()).has('RJ00000001')).toBe(true);
+    expect(await readDlwatcherHealth()).toEqual({}); // 自己這邊的錯，不算 DLWatcher 失敗
+  });
+
+  it('a failing priceLog write skips the batch for this run instead of re-requesting it', async () => {
+    await seed(ids(2));
+    await brokenIndexedDb();
+    await queue.enqueue('productInfo', ids(2));
+    for (let i = 0; i < 3; i++) {
+      await handleAlarm(ALARM_DRAIN);
+      await whenIdle();
+    }
+    expect(calls('productInfo')).toHaveLength(1);
+    expect((await readQueues()).productInfo.ids).toEqual([]);
   });
 });
 
 describe('§3.2.4 recheck', () => {
-  it('rejects ids that are not tracked and applies a 10-minute cooldown per work', async () => {
+  it('rejects ids that are not tracked or paused and applies a 10-minute cooldown per work', async () => {
     await seed(ids(1));
+    const items = await readItems();
+    items.set('RJ00000009', item('RJ00000009', { paused: true }));
+    await writeStore({ items });
     expect(await tracking.recheck(['RJ00000002'])).toEqual({ ok: false, reason: 'notTracked' });
+    expect(await tracking.recheck(['RJ00000009'])).toEqual({ ok: false, reason: 'paused' });
     expect(await tracking.recheck(['RJ00000001'])).toEqual({ ok: true });
     expect(await tracking.recheck(['RJ00000001'])).toEqual({ ok: false, reason: 'cooldown' });
     expect(calls('productInfo')).toHaveLength(1);
@@ -238,18 +351,22 @@ describe('§3.2.4 recheck', () => {
 });
 
 describe('§3.6 DLWatcher health', () => {
-  const failing = (since: number) => writeStore({ dlwatcherHealth: { allFailingSince: new Date(since).toISOString() } });
-
-  it('auto-pauses DLWatcher after 7 days of failures and resumes on request', async () => {
-    await seed(ids(2));
+  const failing = (since: number, last = Date.now() - MIN) =>
+    writeStore({ dlwatcherHealth: { allFailingSince: new Date(since).toISOString(), lastFailureAt: new Date(last).toISOString() } });
+  const DAY = 24 * 60 * MIN;
+  const brokenDlw = () =>
     apiGet.mockImplementation(async (key: string, p: { ids?: string[] }) =>
       key === 'productInfo' ? { ok: true, status: 200, text: productFor(p.ids!) } : { ok: true, status: 200, text: '{"broken":true}' },
     );
-    await failing(Date.now() - 6 * 24 * 60 * MIN);
+
+  it('auto-pauses DLWatcher after 7 days of failures and resumes on request', async () => {
+    await seed(ids(2));
+    brokenDlw();
+    await failing(Date.now() - 6 * DAY);
     await queue.startRun();
     await whenIdle();
     expect((await readSettings()).dlwatcherAutoPausedAt).toBeUndefined();
-    await failing(Date.now() - 7 * 24 * 60 * MIN - MIN);
+    await failing(Date.now() - 7 * DAY - MIN);
     await writeStore({ dlwatcherLastRequest: new Map() });
     await queue.startRun();
     await whenIdle();
@@ -274,6 +391,18 @@ describe('§3.6 DLWatcher health', () => {
     expect(await readDlwatcherHealth()).toEqual({});
   });
 
+  it('a failure after a long quiet gap starts a new streak instead of pausing (M3 review)', async () => {
+    await seed(ids(1));
+    brokenDlw();
+    // 8 天前失敗過一次，之後瀏覽器都關著
+    await failing(Date.now() - 8 * DAY, Date.now() - 8 * DAY);
+    await queue.startRun();
+    await whenIdle();
+    expect((await readSettings()).dlwatcherAutoPausedAt).toBeUndefined();
+    const h = await readDlwatcherHealth();
+    expect(Date.now() - Date.parse(h.allFailingSince!)).toBeLessThan(MIN);
+  });
+
   it('any success clears the failing streak; 404 neither clears nor starts it', async () => {
     await seed(ids(1));
     apiGet.mockImplementation(async (key: string, p: { ids?: string[] }) =>
@@ -282,13 +411,41 @@ describe('§3.6 DLWatcher health', () => {
     await queue.startRun();
     await whenIdle();
     expect(await readDlwatcherHealth()).toEqual({});
-    await failing(Date.now() - 24 * 60 * MIN);
+    // 已經在失敗中：404 不清掉
+    await failing(Date.now() - DAY);
+    const before = await readDlwatcherHealth();
+    await writeStore({ dlwatcherLastRequest: new Map() });
+    await queue.startRun();
+    await whenIdle();
+    expect(await readDlwatcherHealth()).toEqual(before);
+    // 成功一次就清掉
     await writeStore({ dlwatcherLastRequest: new Map() });
     apiGet.mockImplementation(async (key: string, p: { ids?: string[]; id?: string }) =>
       key === 'productInfo' ? { ok: true, status: 200, text: productFor(p.ids!) } : { ok: true, status: 200, text: dlwFor(p.id!) },
     );
     await queue.startRun();
     await whenIdle();
+    expect(await readDlwatcherHealth()).toEqual({});
+  });
+
+  it('DLWatcher being unreachable counts as a failure only while DLsite is reachable (dead domain vs. offline)', async () => {
+    await seed(ids(1));
+    // DLsite 查得到、DLWatcher 連不上（網域失效、整站轉址）：算失敗
+    apiGet.mockImplementation(async (key: string, p: { ids?: string[] }) =>
+      key === 'productInfo' ? { ok: true, status: 200, text: productFor(p.ids!) } : { ok: false, kind: 'network' },
+    );
+    await queue.startRun();
+    await whenIdle();
+    expect((await readDlwatcherHealth()).allFailingSince).toBeDefined();
+    expect((await readBackoff()).dlwatcher.networkFailures).toBe(1);
+    expect((await readQueues()).dlwatcher.ids).toEqual(ids(1)); // 留在佇列稍後重試
+    // 兩邊都連不上（自己離線）：不算
+    await writeStore({ dlwatcherHealth: {}, backoff: { productInfo: { failures: 0 }, dlwatcher: { failures: 0 } } });
+    apiGet.mockImplementation(async () => ({ ok: false, kind: 'network' }));
+    await writeStore({ lastRunAt: new Date(0).toISOString() });
+    await queue.startRun();
+    await whenIdle();
+    await clearNextAtAndKick('dlwatcher');
     expect(await readDlwatcherHealth()).toEqual({});
   });
 

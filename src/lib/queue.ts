@@ -6,7 +6,7 @@ import { browser } from 'wxt/browser';
 import { isoToMs, msToIso, nowIso } from './dates';
 import { isDlwatcherActive } from './history';
 import { QUEUE_MAX_IDS, type BackoffEntry, type QueueSource, type Queues, type Settings, type SourceQueue } from './models';
-import { checkDlwatcherItem, checkProductBatch, type DlwatcherOutcome, type IdOutcome } from './price-check';
+import { checkDlwatcherItem, checkProductBatch, type DlwatcherOutcome, type IdOutcome, type ProductBatchResult } from './price-check';
 import {
   readBackoff,
   readDlwatcherHealth,
@@ -35,11 +35,14 @@ const DEFAULT_TIMING = {
   runBudgetMs: 60_000,
   /** 下一個請求在這個時間內就在原地等，不設 alarm。 */
   maxInlineWaitMs: 3000,
-  /** §3.1：429／5xx 的指數退避（1 分、2 分、4 分），連續 3 次就暫停 6 小時。 */
+  /** §3.1：429／5xx 的指數退避：依次 1 分、2 分、4 分後重試，三次重試都失敗（連續第 4 次）就暫停 6 小時。 */
   backoffMs: [MIN, 2 * MIN, 4 * MIN] as readonly number[],
   pauseMs: 6 * HOUR,
-  /** 連不上（離線）時稍後重試，不計入退避（離線不代表對方有問題）。 */
+  /** 連不上（離線、逾時、DNS、轉址）：1 分鐘後重試，連續失敗時每次加倍，最長 1 小時。不會暫停來源（§3.1）。 */
   networkRetryMs: MIN,
+  networkRetryMaxMs: HOUR,
+  /** 處理中發生非預期的例外：這麼久之後才再試（避免 drain alarm 每 30 秒重送同一個請求）。 */
+  errorRetryMs: 5 * MIN,
   /** chrome.alarms 的最短間隔。 */
   minAlarmMs: 30_000,
 };
@@ -51,10 +54,15 @@ export function __setTimingForTest(p: Partial<typeof DEFAULT_TIMING> = {}): void
 }
 
 const PRODUCT_BATCH = 100;
-/** §3.1：DLWatcher 每件作品 24 小時內最多請求一次。 */
-export const DLWATCHER_MIN_INTERVAL_MS = DAY;
+/**
+ * §3.1：DLWatcher 每件作品 23 小時內最多請求一次。對方的快取是 24 小時，但定時查價剛好每 24 小時（或 6 小時的倍數）一輪，
+ * 一件作品在一輪裡可能晚幾十分鐘才輪到：用 24 小時的話下一輪會差一點點不到而被跳過，變成 30～48 小時才更新一次（M3 審查）。
+ */
+export const DLWATCHER_MIN_INTERVAL_MS = 23 * HOUR;
 /** §3.6：DLWatcher 連續 7 天全部失敗就自動暫停。 */
 export const DLWATCHER_AUTO_PAUSE_MS = 7 * DAY;
+/** §3.6：兩次失敗相隔超過這個時間（中間沒有請求，例如瀏覽器關著），連續失敗重新起算。 */
+export const DLWATCHER_STREAK_GAP_MS = 2 * DAY;
 
 const SOURCES: readonly QueueSource[] = ['productInfo', 'dlwatcher'];
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -80,6 +88,12 @@ function settle(ids: readonly string[], outcome: (id: string) => IdOutcome): voi
     const o = outcome(id);
     for (const fn of list) fn(o);
   }
+}
+
+/** 還在等的回覆：商品 API 在退避中就回 backoff，否則回 queued（作品留在佇列，稍後自動查價）。 */
+function settleWaiting(b: BackoffEntry | null): void {
+  const backingOff = b ? b.pausedUntil !== undefined || b.failures > 0 || b.networkFailures !== undefined : false;
+  settle([...waiters.keys()], () => ({ status: 'failed', reason: backingOff ? 'backoff' : 'queued' }));
 }
 
 // ---- 佇列操作（全部在 writeQueue 裡，和其他寫入依序執行，§4.2）----
@@ -136,15 +150,16 @@ function readyAt(q: SourceQueue, b: BackoffEntry): number {
   return Math.max(q.nextAt ? isoToMs(q.nextAt) : 0, b.pausedUntil ? isoToMs(b.pausedUntil) : 0);
 }
 
-/** §3.1：429／5xx。連續失敗次數加一，依次退避 1、2、4 分鐘；第 3 次暫停這個來源 6 小時。 */
+/** §3.1：429／5xx（或整批被 4xx 拒絕）。依次退避 1、2、4 分鐘；三次重試都失敗就暫停這個來源 6 小時。 */
 async function recordRetryFailure(source: QueueSource): Promise<void> {
   await writeQueue(async () => {
     const [queues, backoff] = await Promise.all([readQueues(), readBackoff()]);
     const now = Date.now();
     const failures = backoff[source].failures + 1;
-    if (failures >= 3) {
+    if (failures > timing.backoffMs.length) {
       backoff[source] = { failures: 0, pausedUntil: msToIso(now + timing.pauseMs) };
     } else {
+      // 對方有回應：連不上的計數歸零
       backoff[source] = { failures };
       queues[source] = { ...queues[source], nextAt: msToIso(now + timing.backoffMs[failures - 1]!) };
     }
@@ -152,15 +167,33 @@ async function recordRetryFailure(source: QueueSource): Promise<void> {
   });
 }
 
-/** 處理完一步：推進佇列，成功時清掉退避狀態。 */
-async function finishStep(source: QueueSource, done: readonly string[], ok: boolean): Promise<void> {
+/** 連不上：同一批稍後重試，間隔隨連續次數加倍（1 分 → 1 小時）。回傳連續次數。 */
+async function recordNetworkFailure(source: QueueSource): Promise<void> {
+  await writeQueue(async () => {
+    const [queues, backoff] = await Promise.all([readQueues(), readBackoff()]);
+    const n = Math.min((backoff[source].networkFailures ?? 0) + 1, 10_000);
+    const delay = Math.min(timing.networkRetryMs * 2 ** Math.min(n - 1, 20), timing.networkRetryMaxMs);
+    backoff[source] = { ...backoff[source], networkFailures: n };
+    queues[source] = { ...queues[source], nextAt: msToIso(Date.now() + delay) };
+    await writeStore({ queues, backoff });
+  });
+}
+
+/**
+ * 處理完一步，推進佇列。`ok`：成功，清掉這個來源的退避狀態；`responded`：對方有回應但這幾件不成功
+ * （查不到、不通過檢查），只清掉「連不上」的計數；`skipped`：沒有送出請求（或處理時出錯），退避狀態不動。
+ */
+async function finishStep(source: QueueSource, done: readonly string[], how: 'ok' | 'responded' | 'skipped'): Promise<void> {
   await writeQueue(async () => {
     const [queues, backoff] = await Promise.all([readQueues(), readBackoff()]);
     queues[source] = advanceQueue(queues[source], done);
     const b = backoff[source];
-    const resetBackoff = ok && (b.failures > 0 || b.pausedUntil !== undefined);
-    if (resetBackoff) backoff[source] = { failures: 0 };
-    await writeStore({ queues, ...(resetBackoff ? { backoff } : {}) });
+    let next: BackoffEntry = b;
+    if (how === 'ok' && (b.failures > 0 || b.pausedUntil !== undefined || b.networkFailures !== undefined)) next = { failures: 0 };
+    else if (how === 'responded' && b.networkFailures !== undefined)
+      next = { failures: b.failures, ...(b.pausedUntil ? { pausedUntil: b.pausedUntil } : {}) };
+    if (next !== b) backoff[source] = next;
+    await writeStore({ queues, ...(next !== b ? { backoff } : {}) });
   });
 }
 
@@ -172,22 +205,33 @@ async function stepProduct(): Promise<void> {
   const items = await readItems();
   // §4.1：暫停追蹤的作品不查價；已移除的略過。
   const batch = slice.filter((id) => items.get(id)?.paused === false);
+  const batchSet = new Set(batch);
+  settle(
+    slice.filter((id) => !batchSet.has(id)),
+    () => ({ status: 'failed', reason: 'notTracked' }),
+  );
   if (batch.length === 0) {
-    await finishStep('productInfo', slice, false);
-    settle(slice, () => ({ status: 'failed', reason: 'notTracked' }));
+    await finishStep('productInfo', slice, 'skipped');
     return;
   }
   const beforeRequest = async () => {
     await setNextAt('productInfo', Date.now() + timing.productIntervalMs);
   };
   await beforeRequest();
-  const r = await checkProductBatch(batch, async () => {
-    await sleep(timing.productIntervalMs);
-    await beforeRequest();
-  });
+  let r: ProductBatchResult | { kind: 'error' };
+  try {
+    r = await checkProductBatch(batch, async () => {
+      await sleep(timing.productIntervalMs);
+      await beforeRequest();
+    });
+  } catch (e) {
+    // 寫入 storage／IndexedDB 失敗等：這一批這一輪跳過，不要每 30 秒重送（M3 審查）
+    console.error('[DL_Assistant] 查價處理失敗，這一批這一輪跳過', e);
+    r = { kind: 'error' };
+  }
   switch (r.kind) {
     case 'done':
-      await finishStep('productInfo', slice, true);
+      await finishStep('productInfo', slice, 'ok');
       settle(slice, (id) => r.outcomes.get(id) ?? { status: 'failed', reason: 'notTracked' });
       return;
     case 'retry':
@@ -195,12 +239,16 @@ async function stepProduct(): Promise<void> {
       settle(batch, () => ({ status: 'failed', reason: r.reason }));
       return;
     case 'network':
-      await setNextAt('productInfo', Date.now() + timing.networkRetryMs);
+      await recordNetworkFailure('productInfo');
       settle(batch, () => ({ status: 'failed', reason: 'network' }));
       return;
     case 'failed':
-      await finishStep('productInfo', slice, false);
+      await finishStep('productInfo', slice, 'responded');
       settle(batch, () => ({ status: 'failed', reason: r.reason }));
+      return;
+    case 'error':
+      await finishStep('productInfo', slice, 'skipped');
+      settle(batch, () => ({ status: 'failed', reason: 'failed' }));
       return;
   }
 }
@@ -211,54 +259,66 @@ async function stepDlwatcher(): Promise<void> {
   if (id === undefined) return;
   const [items, lastRequest] = await Promise.all([readItems(), readDlwatcherLastRequest()]);
   const last = lastRequest.get(id);
-  // §3.1：24 小時內請求過的不再請求（瀏覽器重開也一樣）
+  // §3.1：最近請求過的不再請求（瀏覽器重開也一樣）
   if (items.get(id)?.paused !== false || (last && Date.now() - isoToMs(last) < DLWATCHER_MIN_INTERVAL_MS)) {
-    await finishStep('dlwatcher', [id], false);
+    await finishStep('dlwatcher', [id], 'skipped');
     return;
   }
   await setNextAt('dlwatcher', Date.now() + timing.dlwatcherIntervalMs);
-  const r = await checkDlwatcherItem(id);
-  if (r.kind === 'network') {
-    await setNextAt('dlwatcher', Date.now() + timing.networkRetryMs);
-    return;
+  // 請求時間記送出的時候（不是收到回應的時候），下一輪才不會差幾秒被跳過。
+  const sentAt = nowIso();
+  let r: DlwatcherOutcome | { kind: 'error' };
+  try {
+    r = await checkDlwatcherItem(id);
+  } catch (e) {
+    // IndexedDB 寫入失敗等：當作請求過，23 小時內不再請求（M3 審查：否則每 30 秒重送一次）
+    console.error('[DL_Assistant] DLWatcher 資料處理失敗', e);
+    r = { kind: 'error' };
   }
   if (r.kind === 'rejected' && r.reason === 'notTracked') {
-    await finishStep('dlwatcher', [id], false); // 查詢途中被移除：不算 DLWatcher 失敗
+    await finishStep('dlwatcher', [id], 'skipped'); // 查詢途中被移除：不算 DLWatcher 失敗
     return;
   }
   if (r.kind === 'retry') await recordRetryFailure('dlwatcher');
-  await recordDlwatcherResult(id, r);
+  if (r.kind === 'network') await recordNetworkFailure('dlwatcher');
+  await recordDlwatcherResult(id, r, sentAt);
 }
 
 /**
- * 記下 DLWatcher 的請求時間、推進佇列、更新 §3.6 的健康狀態：任何一件成功就清掉；失敗時記下開始失敗的時間，
- * 持續 7 天都沒有成功就自動暫停 DLWatcher（之後要使用者送 resumeDlwatcher 才恢復）。
- * 404 不算成功也不算失敗：冷門或太新的作品本來就查不到。
+ * 記下 DLWatcher 的請求時間、推進佇列、更新 §3.6 的健康狀態。
+ * - 成功：清掉連續失敗。
+ * - 失敗（驗證失敗、不通過檢查、其他 4xx、429／5xx）：記下開始失敗的時間；和上一次失敗相隔超過 2 天就重新起算
+ *   （中間沒有請求，不能算「連續」）。持續 7 天就自動暫停 DLWatcher，之後要使用者送 resumeDlwatcher 才恢復。
+ * - 連不上：商品 API 同時也連不上（多半是自己離線）時不算；只有 DLWatcher 連不上才算失敗，網域失效或整站轉址時也會自動暫停。
+ * - 404、處理時出錯：不算成功也不算失敗（冷門或太新的作品本來就查不到）。
  */
-async function recordDlwatcherResult(id: string, r: Exclude<DlwatcherOutcome, { kind: 'network' }>): Promise<void> {
-  if (r.kind !== 'retry') {
-    // 對方有正常回應（含 404、不通過檢查）才算請求過；429／5xx 之後要能重試。
-    await finishStep('dlwatcher', [id], r.kind === 'saved' || r.kind === 'notFound');
-  }
+async function recordDlwatcherResult(id: string, r: DlwatcherOutcome | { kind: 'error' }, sentAt: string): Promise<void> {
+  const advance = r.kind !== 'retry' && r.kind !== 'network';
+  if (advance) await finishStep('dlwatcher', [id], r.kind === 'saved' ? 'ok' : r.kind === 'error' ? 'skipped' : 'responded');
   await writeQueue(async () => {
-    const [lastRequest, health, settings, queues] = await Promise.all([
+    const [lastRequest, health, settings, queues, backoff] = await Promise.all([
       readDlwatcherLastRequest(),
       readDlwatcherHealth(),
       readSettings(),
       readQueues(),
+      readBackoff(),
     ]);
     const now = nowIso();
-    if (r.kind !== 'retry') {
+    // 對方有回應（含 404、不通過檢查）或處理時出錯才記請求時間；429／5xx、連不上之後要能重試。
+    if (advance) {
       lastRequest.delete(id);
-      lastRequest.set(id, now);
+      lastRequest.set(id, sentAt);
     }
+    const failed =
+      r.kind === 'rejected' || r.kind === 'retry' || (r.kind === 'network' && backoff.productInfo.networkFailures === undefined);
     let nextHealth = health;
     let nextSettings: Settings | undefined;
     if (r.kind === 'saved') {
-      if (health.allFailingSince) nextHealth = {};
-    } else if (r.kind !== 'notFound') {
-      const since = health.allFailingSince ?? now;
-      nextHealth = { allFailingSince: since };
+      if (health.allFailingSince || health.lastFailureAt) nextHealth = {};
+    } else if (failed) {
+      const gap = health.lastFailureAt ? Date.now() - isoToMs(health.lastFailureAt) : Infinity;
+      const since = health.allFailingSince && gap <= DLWATCHER_STREAK_GAP_MS ? health.allFailingSince : now;
+      nextHealth = { allFailingSince: since, lastFailureAt: now };
       if (Date.now() - isoToMs(since) >= DLWATCHER_AUTO_PAUSE_MS && settings.dlwatcherAutoPausedAt === undefined) {
         nextSettings = { ...settings, dlwatcherAutoPausedAt: now };
         queues.dlwatcher = { ids: [], nextIndex: 0, ...(queues.dlwatcher.nextAt ? { nextAt: queues.dlwatcher.nextAt } : {}) };
@@ -266,7 +326,7 @@ async function recordDlwatcherResult(id: string, r: Exclude<DlwatcherOutcome, { 
       }
     }
     await writeStore({
-      dlwatcherLastRequest: lastRequest,
+      ...(advance ? { dlwatcherLastRequest: lastRequest } : {}),
       ...(nextHealth !== health ? { dlwatcherHealth: nextHealth } : {}),
       ...(nextSettings ? { settings: nextSettings, queues } : {}),
     });
@@ -279,8 +339,8 @@ async function scheduleDrain(atMs: number): Promise<void> {
   await browser.alarms.create(ALARM_DRAIN, { when: Math.max(atMs, Date.now() + timing.minAlarmMs) });
 }
 
-async function runDrain(): Promise<void> {
-  const deadline = Date.now() + timing.runBudgetMs;
+/** `deadline`：這次喚醒的處理期限（§4.1：60 秒）。跑完又被叫到（rerun）時沿用同一個期限。 */
+async function runDrain(deadline: number): Promise<void> {
   for (;;) {
     const [queues, backoff, settings] = await Promise.all([readQueues(), readBackoff(), readSettings()]);
     if (!isDlwatcherActive(settings) && queues.dlwatcher.ids.length > 0) {
@@ -291,10 +351,7 @@ async function runDrain(): Promise<void> {
     }
     // 兩條佇列各自計算可以送請求的時間，一條在退避時不會卡住另一條（§4.1）。
     // 商品 API 在等退避或間隔很久：等著回覆的 track／recheck 先回「已排入佇列」，不用等 DLWatcher 跑完。
-    if (readyAt(queues.productInfo, backoff.productInfo) > Date.now() + timing.maxInlineWaitMs) {
-      const paused = backoff.productInfo.pausedUntil !== undefined || backoff.productInfo.failures > 0;
-      settle([...waiters.keys()], () => ({ status: 'failed', reason: paused ? 'backoff' : 'queued' }));
-    }
+    if (readyAt(queues.productInfo, backoff.productInfo) > Date.now() + timing.maxInlineWaitMs) settleWaiting(backoff.productInfo);
     let pick: { source: QueueSource; at: number } | null = null;
     for (const source of SOURCES) {
       if (!hasWork(queues[source])) continue;
@@ -332,19 +389,21 @@ export function kick(): Promise<void> {
     return running;
   }
   running = (async () => {
+    const deadline = Date.now() + timing.runBudgetMs;
     try {
       do {
         rerun = false;
-        await runDrain();
+        await runDrain(deadline);
       } while (rerun);
     } catch (e) {
+      // storage 讀寫失敗等：不要讓 30 秒後的 drain alarm 馬上重來，晚一點再試
       console.error('[DL_Assistant] 查價佇列處理失敗', e);
+      await scheduleDrain(Date.now() + timing.errorRetryMs).catch(() => undefined);
     } finally {
       running = null;
       // 這次沒處理到的（等退避、等下一次喚醒）：回覆「已排入佇列」
       const b = await readBackoff().catch(() => null);
-      const paused = b ? b.productInfo.pausedUntil !== undefined || b.productInfo.failures > 0 : false;
-      if (!running) settle([...waiters.keys()], () => ({ status: 'failed', reason: paused ? 'backoff' : 'queued' }));
+      if (!running) settleWaiting(b?.productInfo ?? null);
     }
   })();
   return running;
@@ -373,7 +432,7 @@ export async function requestChecks(
   return new Map(ids.map((id, i) => [id, outs[i]!]));
 }
 
-/** DLWatcher 使用中時，把 24 小時內沒請求過的作品加進 dlwatcher 佇列。 */
+/** DLWatcher 使用中時，把 23 小時內沒請求過的作品加進 dlwatcher 佇列。 */
 export async function enqueueDlwatcher(ids: readonly string[], opts: { front?: boolean } = {}): Promise<void> {
   const [settings, lastRequest] = await Promise.all([readSettings(), readDlwatcherLastRequest()]);
   if (!isDlwatcherActive(settings)) return;
