@@ -59,7 +59,7 @@ DLsite 頁面上有廣告與追蹤腳本。它們不能直接呼叫 `chrome.runt
   - `setSettings {partial}` 只接受使用者可編輯的欄位：`checkIntervalHours`（1～24 的整數）、`dlwatcherEnabled`、`usePointPaymentMethod`、`treatUnknownDiscountedAsUsable`、`hideTitlesInNotifications`、`showBadge`、`rules`（5 個布林，也是 strict）。`dlwatcherAutoPausedAt` 只由 background 與 `resumeDlwatcher` 改，`reservedCouponKeys` 只由 `setCouponReserved` 改。改 `checkIntervalHours` 時重建 alarm。
   - `setTarget {id, price?}`：`id` 必須在追蹤清單裡，`price` 用 `intIn(0, 1_000_000)`。
   - `setCouponReserved {key, reserved}`：`key` 必須是目前 `coupons` 裡的 key，長度 ≤ 300。
-  - `recheck {ids}`：`ids` 都必須在追蹤清單裡。
+  - `recheck {ids}`：`ids` 都必須在追蹤清單裡，否則回 `{ ok: false, reason: 'notTracked' }`。全部都在 10 分鐘冷卻內時回 `'cooldown'`；這次排不到（商品 API 在退避、這次喚醒的時間用完）時回 `'backoff'` 或 `'queued'`，作品留在佇列稍後自動查價。
 - **回覆的形狀**（和請求一樣用快照測試鎖住）：
   ```ts
   // content script → background 的 couponSyncResult.result

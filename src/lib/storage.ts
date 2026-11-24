@@ -4,7 +4,13 @@ import { browser } from 'wxt/browser';
 import { z } from 'zod';
 import { isoToMs, nowIso } from './dates';
 import {
+  backoffSchema,
   dailyAutoAddSchema,
+  dlwatcherHealthSchema,
+  queuesSchema,
+  type Backoff,
+  type DlwatcherHealth,
+  type Queues,
   defaultSettings,
   lastCartSchema,
   type DailyAutoAdd,
@@ -26,6 +32,12 @@ export const STORAGE_KEYS = {
   dailyAutoAdd: 'dailyAutoAdd',
   lastCart: 'lastCart',
   untracked: 'untracked',
+  queues: 'queues',
+  backoff: 'backoff',
+  lastRunAt: 'lastRunAt',
+  dlwatcherHealth: 'dlwatcherHealth',
+  dlwatcherLastRequest: 'dlwatcherLastRequest',
+  recheckAt: 'recheckAt',
 } as const;
 
 /** storage 讀回的陣列逐筆驗證，失敗的丟棄；以作品編號為 key 放進 Map（§3.2.3）。 */
@@ -102,6 +114,56 @@ function pruneUntracked(m: Map<string, string>): [string, string][] {
   return [...m.entries()].filter(([, at]) => now - isoToMs(at) < UNTRACKED_TTL_MS).slice(-UNTRACKED_MAX);
 }
 
+// ---- 查價佇列、退避與請求紀錄（§3.1、§4.1）----
+
+export function emptyQueues(): Queues {
+  return { productInfo: { ids: [], nextIndex: 0 }, dlwatcher: { ids: [], nextIndex: 0 } };
+}
+
+export async function readQueues(): Promise<Queues> {
+  const got = await browser.storage.local.get(STORAGE_KEYS.queues);
+  const r = queuesSchema.safeParse(got[STORAGE_KEYS.queues]);
+  return r.success ? r.data : emptyQueues();
+}
+
+export async function readBackoff(): Promise<Backoff> {
+  const got = await browser.storage.local.get(STORAGE_KEYS.backoff);
+  const r = backoffSchema.safeParse(got[STORAGE_KEYS.backoff]);
+  return r.success ? r.data : { productInfo: { failures: 0 }, dlwatcher: { failures: 0 } };
+}
+
+export async function readLastRunAt(): Promise<string | undefined> {
+  const got = await browser.storage.local.get(STORAGE_KEYS.lastRunAt);
+  const r = isoSchema.safeParse(got[STORAGE_KEYS.lastRunAt]);
+  return r.success ? r.data : undefined;
+}
+
+export async function readDlwatcherHealth(): Promise<DlwatcherHealth> {
+  const got = await browser.storage.local.get(STORAGE_KEYS.dlwatcherHealth);
+  const r = dlwatcherHealthSchema.safeParse(got[STORAGE_KEYS.dlwatcherHealth]);
+  return r.success ? r.data : {};
+}
+
+/** `[id, at][]` 形式的紀錄（`dlwatcherLastRequest`、`recheckAt`）。最多 2,000 筆。 */
+const idTimeListSchema = z.array(z.tuple([workIdSchema, isoSchema])).max(2000);
+
+async function readIdTimes(key: string): Promise<Map<string, string>> {
+  const got = await browser.storage.local.get(key);
+  const r = idTimeListSchema.safeParse(got[key]);
+  return new Map(r.success ? r.data : []);
+}
+
+/** 每件作品最近一次請求 DLWatcher 的時間（§3.1：24 小時內最多一次）。 */
+export const readDlwatcherLastRequest = () => readIdTimes(STORAGE_KEYS.dlwatcherLastRequest);
+/** 每件作品最近一次 `recheck` 的時間（§3.2.4：10 分鐘冷卻）。 */
+export const readRecheckAt = () => readIdTimes(STORAGE_KEYS.recheckAt);
+
+/** 只留 `ttlMs` 以內的紀錄（最多 2,000 筆，留最新的）。 */
+function pruneIdTimes(m: Map<string, string>, ttlMs: number): [string, string][] {
+  const now = Date.now();
+  return [...m.entries()].filter(([, at]) => now - isoToMs(at) < ttlMs).slice(-2000);
+}
+
 // ---- 寫入（只在 background 使用）----
 
 /**
@@ -125,7 +187,16 @@ export interface StorePatch {
   dailyAutoAdd?: DailyAutoAdd;
   lastCart?: LastCart;
   untracked?: Map<string, string>;
+  queues?: Queues;
+  backoff?: Backoff;
+  lastRunAt?: string;
+  dlwatcherHealth?: DlwatcherHealth;
+  dlwatcherLastRequest?: Map<string, string>;
+  recheckAt?: Map<string, string>;
 }
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+export const RECHECK_COOLDOWN_MS = 10 * 60 * 1000;
 
 /** 一次 set 寫入多個 key（§4.2 一批一次寫入）。Map 存成陣列。 */
 export async function writeStore(patch: StorePatch): Promise<void> {
@@ -136,6 +207,12 @@ export async function writeStore(patch: StorePatch): Promise<void> {
   if (patch.dailyAutoAdd) out[STORAGE_KEYS.dailyAutoAdd] = patch.dailyAutoAdd;
   if (patch.lastCart) out[STORAGE_KEYS.lastCart] = patch.lastCart;
   if (patch.untracked) out[STORAGE_KEYS.untracked] = pruneUntracked(patch.untracked);
+  if (patch.queues) out[STORAGE_KEYS.queues] = patch.queues;
+  if (patch.backoff) out[STORAGE_KEYS.backoff] = patch.backoff;
+  if (patch.lastRunAt) out[STORAGE_KEYS.lastRunAt] = patch.lastRunAt;
+  if (patch.dlwatcherHealth) out[STORAGE_KEYS.dlwatcherHealth] = patch.dlwatcherHealth;
+  if (patch.dlwatcherLastRequest) out[STORAGE_KEYS.dlwatcherLastRequest] = pruneIdTimes(patch.dlwatcherLastRequest, DAY_MS);
+  if (patch.recheckAt) out[STORAGE_KEYS.recheckAt] = pruneIdTimes(patch.recheckAt, RECHECK_COOLDOWN_MS);
   if (Object.keys(out).length > 0) await browser.storage.local.set(out);
 }
 

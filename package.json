@@ -18,6 +18,7 @@
     "check:manifest": "node scripts/check-manifest.ts",
     "verify:chrome": "node tests/e2e/verify-m1.ts",
     "verify:m2": "node tests/e2e/verify-m2.ts",
+    "verify:m3": "node tests/e2e/verify-m3.ts",
     "check:all": "prettier --check . && eslint . && tsc --noEmit && vitest run && wxt build && node scripts/check-manifest.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check ."
@@ -37,6 +38,7 @@
     "eslint": "^9.39.5",
     "eslint-plugin-no-unsanitized": "^4.1.5",
     "eslint-plugin-react": "^7.37.5",
+    "fake-indexeddb": "^6.2.8",
     "globals": "^17.14.0",
     "prettier": "^3.10.1",
     "tailwindcss": "^4.3.5",

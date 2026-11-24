@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fakeBrowser } from 'wxt/testing/fake-browser';
 import type { SenderLike } from '../src/lib/messages';
 
@@ -9,7 +9,7 @@ vi.mock('../src/lib/api/endpoints', () => ({ apiGet: (...args: unknown[]) => api
 const { handleContentMessage } = await import('../src/lib/content-handlers');
 const { claimDocument } = await import('../src/lib/auto-track');
 const { readDailyAutoAdd, readItems, readLastCart, writeStore } = await import('../src/lib/storage');
-const { __resetThrottleForTest } = await import('../src/lib/tracking');
+const { __setTimingForTest, whenIdle } = await import('../src/lib/queue');
 const { jstDate, nowIso } = await import('../src/lib/dates');
 
 const ID = 'abcdefghijklmnopabcdefghijklmnop';
@@ -30,9 +30,16 @@ const today = () => jstDate(nowIso());
 
 beforeEach(() => {
   fakeBrowser.reset();
-  __resetThrottleForTest();
+  __setTimingForTest({ productIntervalMs: 0, dlwatcherIntervalMs: 0 });
   apiGet.mockReset();
-  apiGet.mockResolvedValue({ ok: true, status: 200, text: '[]' });
+  apiGet.mockImplementation(async (key: string) =>
+    key === 'productInfo' ? { ok: true, status: 200, text: '[]' } : { ok: false, kind: 'http', status: 404 },
+  );
+});
+
+afterEach(async () => {
+  await whenIdle();
+  __setTimingForTest();
 });
 
 describe('cartClicked (F1)', () => {
@@ -196,7 +203,6 @@ describe('M2 review fixes', () => {
     const { readUntracked } = await import('../src/lib/storage');
     await tracking.trackItem('RJ01014447', 'manual', { awaitPrice: true });
     await tracking.untrackItem('RJ01014447');
-    __resetThrottleForTest();
     await tracking.trackItem('RJ01014447', 'manual', { awaitPrice: true });
     expect((await readUntracked()).size).toBe(0);
   });

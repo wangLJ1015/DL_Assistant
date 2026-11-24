@@ -54,6 +54,13 @@ export function parseJst(s: string): string | null {
   return ms === null ? null : msToIso(ms);
 }
 
+/** 畫面顯示用：使用者時區的日期（YYYY-MM-DD，§5.5）。 */
+export function localDate(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
 /** 某個 UTC 時間在 JST 的年份。 */
 export function jstYear(iso: string): number {
   return new Date(isoToMs(iso) + JST_OFFSET).getUTCFullYear();
@@ -98,9 +105,22 @@ export function unixSecondsToIso(sec: number): string {
   return msToIso(sec * 1000);
 }
 
-/** DLWatcher 的日期格式在 M3 確認（§5.2）；確認前一律當作解析失敗。 */
-export function parseDlwatcherDate(_s: string): string | null {
-  return null;
+/**
+ * DLWatcher 的日期（§5.2）。2026-11-23 實測：`lowestPrice.start／end`、`recentSalePriceLog[].start／end`
+ * 都是 `toISOString()` 格式的 UTC 字串（`2024-07-11T13:40:03.000Z`）。只接受這個格式，其他一律當作解析失敗。
+ */
+export function parseDlwatcherDate(s: string): string | null {
+  return isCanonicalIso(s) ? s : null;
+}
+
+/**
+ * DLWatcher 走勢點的 x（年內進度 0～1）換算成日期（§5.2）：該年 JST 1/1 00:00 + x × 該年天數。
+ * 誤差大約一天。x 的範圍由合理性檢查負責（§3.6）。
+ */
+export function curvePointDate(year: number, x: number): string {
+  const start = Date.UTC(year, 0, 1) - JST_OFFSET;
+  const days = (Date.UTC(year + 1, 0, 1) - Date.UTC(year, 0, 1)) / DAY;
+  return msToIso(Math.round(start + x * days * DAY));
 }
 
 /** 測試用：regex 本身（§3.2.6 ReDoS 測試直接對 regex 餵長字串）。 */

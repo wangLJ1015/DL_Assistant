@@ -13,7 +13,7 @@
 | 分站差異 | 用 `maniax` 路徑查 `home` 的作品是否都查得到（目前實測可以） |
 | 預購與套組作品 | `is_reserve_work`、套組作品的價格欄位是否不同 |
 | `discount_end_date` | 用年底跨年的活動實測 §5.5 的補年份規則 |
-| DLWatcher 覆蓋率 | 冷門或新作品是否查得到（查不到時只用自己的紀錄） |
+| DLWatcher 覆蓋率 | 冷門或新作品是否查得到（查不到時只用自己的紀錄）。M3 抽查 3 件 2026 年的新作品，2 件 404 |
 | ~~優惠券頁面~~ | ✅ 已確認：有 JSON API，見 §5.4 |
 | **用券規則**（試算正確性的關鍵） | 見 §10.1 與 §10.2 |
 | ~~作品類型欄位~~ | ✅ 已確認：商品 API 有 `site_id`、`work_type`、`custom_genres` |
@@ -44,8 +44,8 @@
 | ~~content script 排除路徑~~ | ✅ M2（2026-11-23，未登入）：立即購買 `/<分站>/pay/member/=/relayout/cart/buynow/…`、マイページ `/<分站>/mypage/…`、登入 `/<分站>/login/…`、註冊 `/<分站>/regist/user`，寫進 `exclude_matches`（v0.11 起結尾不要求斜線，見 §3.2.5）；購物車頁 `/<分站>/cart/`（各分站共用），作品是 `ul.cart_list > li.cart_list_item[data-product-id]`（推薦區也有 `data-product_id`，不能用）；加入購物車：列表頁 `a.btn_cart[href="/<分站>/cart/=/product_id/<ID>.html"]`（GET）、作品頁 `button.btn_cart[data-ga4-ref="cart_add"]`（沒有 href，送 `POST /api/cart/<分站>/add`），寫進 `selectors.ts` 與打包掃描。`verify:m2` 確認 9 個排除網址（`/home/mypage`、`/home/mypage/`、`/home/mypage/setting`、`/home/pay`、立即購買、`/home/login`、`/home/login/=/…`、`/home/regist`、`/home/regist/user`）都沒有注入 content script（v0.10 只測了 2 個，`/home/mypage` 這種沒有結尾斜線的其實沒擋到）。**未確認**：登入後才出現的帳號頁路徑、從購物車頁按「購入手続きへ」（表單 POST 到 `/<分站>/cart`）之後的付款頁網址 | M2 |
 | `onMessage` 非同步回應 | ✅ M2：用 `ServiceWorker.stopAllWorkers` 停掉 service worker 後，content script 的 `cartSnapshot` 會喚醒它並正常處理（`return true`＋`sendResponse`）。**未確認**：`badgeInfo` 的實際回覆時間（M6 才有徽章） | M2 → M6 |
 | ~~`sender.url`~~ | ✅ M2（Chrome 157）：頁面 `history.pushState` 到 `/home/cart/` 之後，content script 送的訊息 `sender.url` 仍是文件載入時的網址（不會改變），頁面無法讓 `cartSnapshot` 的頁面檢查誤判。v0.11 起 `verify:m2` 把它當成檢查項目（v0.10 只印出來） | M2 |
-| service worker | 單純等待 fetch 回應是否算活動（不算就靠 §4.1 的進度寫回） | M3 |
-| DLWatcher 日期 | `start`／`end` 欄位的格式與時區（§5.2）；進行中的特價，`lowestPrice.priceInfo.end` 是未來的結束時間還是最後看到的時間（§3.6 合理性檢查） | M3 |
+| service worker | ✅ M3（Chrome 157，2026-11-23）：用 CDP 在瀏覽器層級攔住 DLWatcher 請求、不附加到 service worker、清掉 `drain` alarm，請求 75 秒沒有回應時 service worker **沒有**被終止。Chrome 文件寫「fetch 回應超過 30 秒」可能被終止，所以設計不依賴這個行為：`apiGet` 30 秒逾時、處理中一直有 `drain` alarm、進度每一步寫回（§3.1、§4.1）。`verify:m3` 確認：處理到第 3/10 件時 `stopAllWorkers`，`drain` alarm 叫醒後從中斷處做完、每件只請求一次；一直不回應的請求 30 秒後放棄、約 90 秒後重試並存好 | M3 |
+| ~~DLWatcher 日期~~ | ✅ M3（2026-11-23）：`toISOString()` 格式的 UTC 字串；欄位在 `lowestPrice.start／end`（不在 `priceInfo` 裡）；進行中的特價，`end` 是**最後一次看到這個價格的時間**（不是未來的結束時間）。走勢點 `x`、`y` 是字串；不存在的作品回 404 HTML（§5.2） | M3 |
 | `storage.local.set` 多個 key | 一次寫入多個 key 是否不可分割（§4.2） | M4 |
 | DLsite 圖片 | ✅（popup，Chrome 157）：擴充功能頁面以 `referrerPolicy="no-referrer"` 載入 `img.dlsite.jp` 的作品圖片成功（`verify:chrome`）。**未確認**：儀表板大量載入時是否被限流 | M5 |
 | 注入 UI 的樣式 | DLsite 頁面的 CSP 是否擋住 content script 插入 closed shadow root 的 `<style>`。被擋就改用 `new CSSStyleSheet()`＋`replaceSync()`，指派給 `shadowRoot.adoptedStyleSheets`（constructable stylesheet 不受頁面 CSP 的 `style-src` 限制）；要確認在 isolated world 建立的樣式表能否指派給頁面文件裡的 shadow root | M6 |
