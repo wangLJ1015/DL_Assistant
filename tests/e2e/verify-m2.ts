@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
-import { Cdp, evaluate, poll, sleep } from './cdp.ts';
+import { attachServiceWorker, Cdp, closeChrome, evaluate, poll, sleep, watchdog } from './cdp.ts';
 
 const ROOT = resolve(import.meta.dirname, '../..');
 const EXT_DIR = join(ROOT, '.output/chrome-mv3');
@@ -99,6 +99,7 @@ async function main() {
     stderr += d.toString();
   });
   const cdp = new Cdp(child.stdio[3] as Writable, child.stdio[4] as Readable);
+  const disarm = watchdog('verify-m2', 5 * 60_000, () => [child]);
   const realRequests: string[] = [];
 
   try {
@@ -143,20 +144,9 @@ async function main() {
       }
     });
 
-    const findSw = () =>
-      poll(
-        async () => {
-          const { targetInfos } = (await cdp.send('Target.getTargets')) as {
-            targetInfos: { targetId: string; type: string; url: string }[];
-          };
-          return targetInfos.find((t) => t.type === 'service_worker' && t.url === `${EXT}/background.js`)?.targetId;
-        },
-        15_000,
-        'service worker target',
-      );
     const attachSw = async () => {
-      const { sessionId } = (await cdp.send('Target.attachToTarget', { targetId: await findSw(), flatten: true })) as { sessionId: string };
-      await intercept(sessionId);
+      // service worker 可能還在啟動、或停止後還留著舊的 target：等到 chrome.storage 可以用（cdp.ts）
+      const sessionId = await attachServiceWorker(cdp, EXT, { onAttach: intercept });
       await cdp.send('Runtime.enable', {}, sessionId);
       // 記下 content script 訊息的 sender.url（§10.3 pushState）
       await evaluate(
@@ -382,16 +372,12 @@ async function main() {
       realRequests.slice(0, 3).join(' | ') || 'none',
     );
   } finally {
-    try {
-      await cdp.send('Browser.close');
-    } catch {
-      child.kill();
-    }
-    await new Promise((r) => child.once('exit', r));
+    await closeChrome(child, cdp);
     await sleep(500);
     rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
   }
 
+  disarm();
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
   if (failed.length > 0) {
