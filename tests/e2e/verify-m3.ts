@@ -11,7 +11,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
-import { Cdp, evaluate, poll, sleep } from './cdp.ts';
+import { attachServiceWorker, Cdp, closeChrome, evaluate, poll, sleep, watchdog } from './cdp.ts';
 
 const ROOT = resolve(import.meta.dirname, '../..');
 const EXT_DIR = join(ROOT, '.output/chrome-mv3');
@@ -56,6 +56,7 @@ async function main() {
     stderr += d.toString();
   });
   const cdp = new Cdp(child.stdio[3] as Writable, child.stdio[4] as Readable);
+  const disarm = watchdog('verify-m3', 10 * 60_000, () => [child]);
   const realRequests: string[] = [];
   /** DLWatcher 被請求的作品（依序）。 */
   const dlwRequests: string[] = [];
@@ -117,34 +118,24 @@ async function main() {
     });
     const intercept = (sessionId?: string) => cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] }, sessionId);
 
-    const swTarget = () =>
-      poll(
-        async () => {
-          const { targetInfos } = (await cdp.send('Target.getTargets')) as {
-            targetInfos: { targetId: string; type: string; url: string }[];
-          };
-          return targetInfos.find((t) => t.type === 'service_worker' && t.url === `${EXT}/background.js`)?.targetId;
-        },
-        15_000,
-        'service worker target',
-      );
     let swSession: string | undefined;
-    const attachSw = async () => {
-      const { sessionId } = (await cdp.send('Target.attachToTarget', { targetId: await swTarget(), flatten: true })) as {
-        sessionId: string;
-      };
-      await intercept(sessionId);
-      swSession = sessionId;
-    };
     // service worker 每次重新啟動都是新的 target：自動附加並攔截（第 4 項之前）
     let autoAttach = true;
     cdp.on((e) => {
       if (e.method !== 'Target.targetCreated' || !autoAttach) return;
       const info = e.params.targetInfo as { targetId: string; type: string; url: string };
-      if (info.type === 'service_worker' && info.url === `${EXT}/background.js`) void attachSw().catch(() => undefined);
+      if (info.type !== 'service_worker' || info.url !== `${EXT}/background.js`) return;
+      void cdp
+        .send('Target.attachToTarget', { targetId: info.targetId, flatten: true })
+        .then(async ({ sessionId }) => {
+          await intercept(String(sessionId));
+          swSession = String(sessionId);
+        })
+        .catch(() => undefined);
     });
     await cdp.send('Target.setDiscoverTargets', { discover: true });
-    await attachSw();
+    // 剛載入時 service worker 可能還在啟動或被替換：等到 chrome.storage 可以用（cdp.ts）
+    swSession = await attachServiceWorker(cdp, EXT, { onAttach: intercept });
 
     const openTab = async (url: string) => {
       const { targetId } = (await cdp.send('Target.createTarget', { url: 'about:blank' })) as { targetId: string };
@@ -300,16 +291,12 @@ async function main() {
       realRequests.slice(0, 3).join(' | ') || 'none',
     );
   } finally {
-    try {
-      await cdp.send('Browser.close');
-    } catch {
-      child.kill();
-    }
-    await new Promise((r) => child.once('exit', r));
+    await closeChrome(child, cdp);
     await sleep(500);
     rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
   }
 
+  disarm();
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
   if (failed.length > 0) {
