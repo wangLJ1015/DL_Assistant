@@ -52,6 +52,7 @@ COREPACK_ENABLE_DOWNLOAD_PROMPT=0 corepack pnpm verify:m4     # M4 實機驗證�
 - 只跑單一測試：`./node_modules/.bin/vitest run tests/xxx.test.ts`；只跑 lint 自我測試：`tests/lint-selftest.test.ts`。
 - 實機驗證用本機 Chrome（M1～M3 時是 157，2026-11-24 已自動更新成 158；`C:\Program Files\Google\Chrome\Application\chrome.exe`，可用 `CHROME_PATH` 換），臨時 profile，跑完刪除。`HEADLESS=0` 可以看到視窗。
 - 每個 `verify:*` 都要先 `build`（`check:all` 會順便建置）。
+- 實機驗證不會再無聲卡住（2026-11-24）：`tests/e2e/cdp.ts` 的每個 CDP 指令都有逾時（`CDP_TIMEOUT_MS`，預設 60 秒），每支腳本有整體上限（`VERIFY_TIMEOUT_MS`）。附加 service worker 一律用 `attachServiceWorker()`（剛載入時 `chrome` 還沒定義、被停掉的 worker 不會回應指令，見 verification.md「CDP 附加 service worker」）；關閉、強制結束 Chrome 用 `closeChrome()`、`killChrome()`。
 
 ## 4. 絕對不能做的事
 

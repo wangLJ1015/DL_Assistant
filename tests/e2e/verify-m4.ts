@@ -8,12 +8,12 @@
 // 第二部分（§10.3「storage.local.set 多個 key 是否不可分割」）：一直用一次 set 寫兩個 key，中途強制結束整個 Chrome
 // （taskkill /F /T），用同一個 profile 重開後檢查兩個 key 的版本一致，重複數次。
 // 環境變數：CHROME_PATH、HEADLESS=0（同 verify-m1.ts）、M4_PART=notify 或 atomic（只跑一部分）。
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
-import { Cdp, evaluate, poll, sleep } from './cdp.ts';
+import { attachServiceWorker, Cdp, closeChrome, evaluate, killChrome, poll, sleep, watchdog } from './cdp.ts';
 
 const ROOT = resolve(import.meta.dirname, '../..');
 const EXT_DIR = join(ROOT, '.output/chrome-mv3');
@@ -60,6 +60,9 @@ function productFor(reqIds: string[]): string {
   return Object.keys(out).length === 0 ? '[]' : JSON.stringify(out);
 }
 
+/** 目前的 Chrome（watchdog 逾時時強制結束它）。 */
+let currentChild: ChildProcess | undefined;
+
 function launch(profile: string): { child: ChildProcess; cdp: Cdp; stderr: () => string } {
   const args = [
     `--user-data-dir=${profile}`,
@@ -75,40 +78,12 @@ function launch(profile: string): { child: ChildProcess; cdp: Cdp; stderr: () =>
   ];
   if (process.env.HEADLESS !== '0') args.unshift('--headless=new');
   const child = spawn(CHROME, args, { stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'] });
+  currentChild = child;
   let err = '';
   child.stdio[2]!.on('data', (d: Buffer) => {
     err += d.toString();
   });
   return { child, cdp: new Cdp(child.stdio[3] as Writable, child.stdio[4] as Readable), stderr: () => err };
-}
-
-async function closeChrome(child: ChildProcess, cdp: Cdp) {
-  try {
-    await Promise.race([cdp.send('Browser.close'), sleep(5000).then(() => Promise.reject(new Error('timeout')))]);
-  } catch {
-    child.kill();
-  }
-  if (child.exitCode === null) await new Promise((r) => child.once('exit', r));
-  await sleep(500);
-}
-
-/** 整個 Chrome 程序樹強制結束（模擬當機、斷電前的狀態）。 */
-async function killChrome(child: ChildProcess) {
-  if (process.platform === 'win32') spawnSync('taskkill', ['/F', '/T', '/PID', String(child.pid)], { stdio: 'ignore' });
-  else child.kill('SIGKILL');
-  if (child.exitCode === null) await new Promise((r) => child.once('exit', r));
-  await sleep(1000);
-}
-
-async function swTargetId(cdp: Cdp, ext: string): Promise<string> {
-  return poll(
-    async () => {
-      const { targetInfos } = (await cdp.send('Target.getTargets')) as { targetInfos: { targetId: string; type: string; url: string }[] };
-      return targetInfos.find((t) => t.type === 'service_worker' && t.url === `${ext}/background.js`)?.targetId;
-    },
-    15_000,
-    'service worker target',
-  );
 }
 
 // ---------------- 第一部分：通知 ----------------
@@ -165,7 +140,8 @@ async function notificationsPart() {
       await intercept(sessionId);
       return sessionId;
     };
-    let sw = await attach(await swTargetId(cdp, EXT));
+    // 等到 chrome.storage 可以用才回傳（剛載入時 service worker 可能還在啟動，cdp.ts 的 attachServiceWorker）
+    let sw = await attachServiceWorker(cdp, EXT, { onAttach: intercept });
     // service worker 重新啟動時是新的 target：自動附加並攔截
     cdp.on((e) => {
       if (e.method !== 'Target.targetCreated') return;
@@ -367,22 +343,8 @@ async function atomicityPart() {
         extId = id;
         const EXT = `chrome-extension://${extId}`;
         // 重新載入後，service worker 的 target 可能還在啟動或被替換（附加上去時 `chrome` 還沒定義）：
-        // 重試到 chrome.storage 可以用為止。
-        const sessionId = await poll(
-          async () => {
-            const targetId = await swTargetId(cdp, EXT).catch(() => undefined);
-            if (!targetId) return undefined;
-            const s = (await cdp.send('Target.attachToTarget', { targetId, flatten: true }).catch(() => undefined)) as
-              { sessionId: string } | undefined;
-            if (!s) return undefined;
-            const ready = await evaluate(cdp, s.sessionId, `typeof chrome !== 'undefined' && !!chrome.storage?.local`).catch(() => false);
-            if (ready === true) return s.sessionId;
-            await cdp.send('Target.detachFromTarget', { sessionId: s.sessionId }).catch(() => undefined);
-            return undefined;
-          },
-          20_000,
-          'service worker ready',
-        ).catch(() => undefined);
+        // attachServiceWorker 重試到 chrome.storage 可以用為止。
+        const sessionId = await attachServiceWorker(cdp, EXT, { timeoutMs: 20_000 }).catch(() => undefined);
         if (!sessionId) {
           rounds.push(`第 ${round + 1} 輪：重開後找不到可用的 service worker`);
           ok = false;
@@ -411,6 +373,7 @@ async function atomicityPart() {
         );
         await sleep(1500 + Math.floor(Math.random() * 2000));
         await killChrome(child);
+        await sleep(1000); // profile 的檔案鎖釋放後再重開
       } catch (e) {
         await killChrome(child);
         throw e;
@@ -427,10 +390,13 @@ async function atomicityPart() {
 }
 
 async function main() {
+  // 整支腳本的上限（cdp.ts 的 watchdog）：超過就強制結束 Chrome 並以失敗結束，不會一直卡著
+  const disarm = watchdog('verify-m4', 10 * 60_000, () => [currentChild]);
   // M4_PART=notify／atomic：只跑其中一部分（除錯用）
   const part = process.env.M4_PART;
   if (part !== 'atomic') await notificationsPart();
   if (part !== 'notify') await atomicityPart();
+  disarm();
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} passed`);
   if (failed.length > 0) process.exitCode = 1;
