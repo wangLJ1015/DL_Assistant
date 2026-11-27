@@ -1,6 +1,6 @@
 # DL_Assistant 專案規格書
 
-> 版本：v0.14（草案，依 M3 審查修正）　日期：2026-11-24
+> 版本：v0.16（草案，依 M4 審查修正）　日期：2026-11-24
 > 一句話說明：Chrome 擴充功能。把 DLsite 加入購物車的作品自動列入追蹤，定時查價、顯示史低與價格走勢，出現優惠時跳出通知；也能隨時查任一作品的史低，並依你手上的優惠券算出最划算的買法。
 >
 > 變更紀錄見 [CHANGELOG.md](CHANGELOG.md)。規格分成四個檔案，章節編號跨檔案沿用：
@@ -137,7 +137,8 @@
   - 任何一件成功就清掉 `dlwatcherHealth`。
   - 失敗（驗證失敗、不通過檢查、429／5xx、其他 4xx，以及**商品 API 同時連得上時**的 DLWatcher 連不上）時記下 `lastFailureAt`；`allFailingSince` 沒有值、或距離上一次失敗超過 2 天（中間沒有請求，例如瀏覽器關著，不能算「連續」）就從現在重新起算。距離 `allFailingSince` 滿 7 天就設定 `Settings.dlwatcherAutoPausedAt` 並清空 DLWatcher 佇列。
   - 商品 API 也連不上（多半是自己離線）時，DLWatcher 連不上不算；網域失效或整站轉址（`redirect: 'error'` 會讓 fetch 失敗）時商品 API 照常，所以會算進去並在 7 天後自動暫停。
-  - 404 與處理時自己這邊出錯不算成功也不算失敗（冷門或太新的作品本來就查不到）。M3 先在 popup 顯示暫停提示與「重新開啟」（`resumeDlwatcher`），系統通知在 M4 和其他通知一起做。
+  - 404 與處理時自己這邊出錯不算成功也不算失敗（冷門或太新的作品本來就查不到）。popup 顯示暫停提示與「重新開啟」（`resumeDlwatcher`，M3）。
+  - 系統通知（M4）：標題「DL_Assistant：DLWatcher 已暫停」，內文「DLWatcher 似乎已停止服務，已改用自己的紀錄。要重新開啟，請到擴充功能的 popup 按「重新開啟」。」。和 `Settings.dlwatcherAutoPausedAt` 同一次寫入 `recentNotifications`（`rules: ['dlwatcherPaused']`、`ids: []`），寫完才送（§4.2）；點擊只關掉通知，不開任何頁面。
 - 臨時查詢（F12、F13）的結果不寫進 `priceLog`。收到任何來源的 `track` 時，若 `lookupCache` 有這件作品而且未滿 24 小時，就用它寫第一筆 `priceLog` 與快照；否則照一般流程排進查價佇列。
 - F10 匯出包含 `priceLog`，換電腦或重裝時可以帶走自己的紀錄。
 - DOM 選擇器集中在 `selectors.ts`，改版時只要改一處。
@@ -217,7 +218,7 @@ MV3 service worker 閒置 30 秒會被終止，記憶體裡的狀態會消失。
 - 擴充功能頁面讀取資料時直接讀 `chrome.storage.local` 與 IndexedDB，並用 `chrome.storage.onChanged` 更新畫面。content script 讀不到 IndexedDB 的擴充功能資料，徽章需要的資料由 background 回覆 `badgeInfo`。
 - IndexedDB 連線處理 `versionchange` 事件：收到就關閉連線並提示重新整理頁面。
 - 同步鎖與 `syncToken` 的「讀取、判斷、寫入」也放在同一個 Promise 佇列裡執行，兩個分頁同時送 `shouldSyncCoupons` 時只有一個拿到 token。
-- **寫入與通知的先後**：以 §4.1 的一批（商品 API 一次最多 100 件）為單位。整批每件作品依 §6.1 處理完後，用**一次** `chrome.storage.local.set({...})` 寫入 `snapshots`、`ruleState`、`notified`、`recentNotifications`，`priceLog` 用一個 IndexedDB transaction 寫入，然後才把這批的候選合併成一則通知並呼叫 `chrome.notifications.create`。service worker 若在中間被終止，寧可漏發也不重複發；漏發的通知仍在「最近的通知」看得到。跨批次不合併（一輪查價最多 10 批，可能出現多則通知）。（每件各寫一次的話，1,000 件要序列化 1,000 次整份資料；一次 `set` 寫多個 key 是否不可分割，見 §10.3。）
+- **寫入與通知的先後**：以 §4.1 的一批（商品 API 一次最多 100 件）為單位。整批每件作品依 §6.1 處理完後，用**一次** `chrome.storage.local.set({...})` 寫入 `snapshots`、`ruleState`、`notified`、`recentNotifications`，`priceLog` 用一個 IndexedDB transaction 寫入，然後才把這批的候選合併成一則通知並呼叫 `chrome.notifications.create`。service worker 若在中間被終止，寧可漏發也不重複發；漏發的通知仍在「最近的通知」看得到。跨批次不合併（一輪查價最多 10 批，可能出現多則通知）。§4.1 拆半找壞編號時，每一個成功寫回的一半各算一批（v0.15）。（每件各寫一次的話，1,000 件要序列化 1,000 次整份資料；一次 `set` 寫多個 key 是否不可分割，見 §10.3。）
 - **清理**：移除追蹤時刪掉該作品的 `RuleState`、`snapshots`（`priceLog` 與 `history` 保留，重新追蹤時還能用；`history` 有 `dlwatcherLastRequest` 擋著，23 小時內重新追蹤不會再請求）；每次同步優惠券後，刪掉已不存在的 `coupon.key` 的 `RuleState` 與 `Settings.reservedCouponKeys`。
 
 ---
@@ -447,6 +448,9 @@ interface CouponSyncState {
 
 // 每個對象每條規則的上次判定結果（key: "ruleState"，載入後放進 Map）
 // Map 的 key 為 JSON.stringify([對象種類, 對象編號, rule])，對象種類是 'work' 或 'coupon'
+// 不成立的不存（從 Map 刪掉，和「上次不成立」等價），1,000 件 × 4 條規則不會讓每批的 set 變大（v0.15）
+// 讀回時檢查 key 是 JSON.stringify(['work', 作品編號, 作品的規則]) 或 (['coupon', coupon.key, 'couponExpiring'])，不符的丟棄；
+// 超過 20,000 筆時留最新加入的（Map 新加入的在後面，v0.16）
 interface RuleState {
   active: boolean;               // 上次判定時條件是否成立
   since?: string;                // 這次成立的開始時間
@@ -460,10 +464,10 @@ interface NotifiedKey {
 
 // 最近的通知（key: "recentNotifications"，保留 50 則），popup 與儀表板顯示
 interface RecentNotification {
-  notificationId: string;
-  ids: string[];                 // 這則通知涵蓋的作品
+  notificationId: string;        // crypto.randomUUID()（36 字，§6.2 的 ≤ 64）
+  ids: string[];                 // 這則通知涵蓋的作品；DLWatcher 自動暫停的通知是 []
   couponKeys?: string[];         // couponExpiring 的券；點擊開啟試算頁 planner.html（§6.2）
-  rules: string[];
+  rules: ('sale' | 'target' | 'lowest' | 'ending' | 'couponExpiring' | 'dlwatcherPaused')[];  // dlwatcherPaused：§3.6 的系統通知
   text: string;
   at: string;
 }
@@ -569,14 +573,16 @@ GET https://www.dlsite.com/home/mypage/coupon/list/ajax
 - 每條規則可在設定裡開關（`Settings.rules`）。
 - 「折扣又加深」（`deeper`）規則移到第二階段：v1 不通知同一段優惠中的折扣加深。
 - `couponExpiring`：勾了「留著不用」的券照樣提醒（留著不用正是怕它過期），內文標示「你設定為留著不用」。`E` 會因作品開始或結束打折而變化，條件可能在 7 天內「成立 → 不成立 → 成立」；去重 key 含 `expiresAt`，不會重發，這是預期行為。
-- `target`：`setTarget` 時用目前的快照重算 `target` 的 `RuleState`，已經成立就記成成立、不通知（你剛設定就知道已經低於目標價）。暫停後恢復時若已低於目標價，同樣不通知，追蹤清單標示「已低於目標價」。
+- `target`：`setTarget` 時用目前的快照重算 `target` 的 `RuleState`，已經成立就記成成立、不通知（你剛設定就知道已經低於目標價）。快照是查不到時，用快照沿用的最後一次知道的價格判斷（v0.16，M4 審查：查不到時規則狀態維持不變，這裡清成不成立的話恢復時會發出 `target`）。暫停後恢復時若已低於目標價，同樣不通知，追蹤清單標示「已低於目標價」。
+- `lowest` 是「現價 ≤ 史低基準」：新的一段優惠和之前的史低同價時也成立（內文寫「和史低同價」）。同一段優惠裡再降價不重發（`lowest` 已經成立；「折扣又加深」在第二階段）。
+- `setPaused {id, paused}`：暫停時不查價、不通知；恢復時清掉 `baselineAt` 並馬上排一次查價（建立基準，§6.1 第 6 步）。
 
 ### 6.1 處理步驟
 每次查價，每件作品依序處理（`lib/rules.ts`，單元測試照這個順序寫）：
 1. 驗證、轉換 API 資料，得到本次快照 `s`。查不到時 `s.available = false`，價格欄位沿用上一次（沒有任何先前資料時見 §5.3 `priceLog` 的說明）。
 2. 計算 `onSale = isOnSale(s, 現在)`（查不到時一定是 false）。
 3. **決定 `episode`**：
-   - `s.available` 為 false → **保留**上次的 `episode`（不清掉）。下一次查得到而且仍在打折時，照下面的規則和保留的 `episode` 比較，判斷是不是新的一段優惠。連續查不到超過 7 天才清掉 `episode`。（否則沒有活動編號也沒有截止日的作品，一次查不到就會在隔天重發「特價＋史低」。）
+   - `s.available` 為 false → **保留**上次的 `episode`（不清掉）。下一次查得到而且仍在打折時，照下面的規則和保留的 `episode` 比較，判斷是不是新的一段優惠。連續查不到超過 7 天才清掉 `episode`。（否則沒有活動編號也沒有截止日的作品，一次查不到就會在隔天重發「特價＋史低」。）「最後一次查得到」取 `priceLog` 裡 `status` 為空的最後一筆 `lastSeenAt` 與 `episode.startedAt` 的較晚者（v0.16，M4 審查：`priceLog` 遺失或寫入失敗時，不能第一次查不到就清掉）。
    - `s.available` 為 true 而且 `onSale` 為 false → 清掉 `episode`。
    - `onSale` 為 true，而且符合下列任一情況 → **新的一段優惠**，`episode = { key: campaignId ?? discountEnd ?? 'start:' + 這次的 JST 日期, startedAt: 現在 }`：
      - 上次沒有 `episode`（打折從無到有）。
@@ -584,9 +590,9 @@ GET https://www.dlsite.com/home/mypage/coupon/list/ajax
      - `campaignId` 為空，而且 `discountEnd` 往後延超過 7 天。
    - 其他情況沿用上次的 `episode`。
    （`campaignId`、`discountEnd` 的空字串在解析時已轉成 `undefined`，§3.2.3。）
-4. **計算每條規則的條件**。`lowest` 的史低基準 = min(DLWatcher 史低, 自己紀錄中 `at` 早於 `episode.startedAt` 的最低價)，只計算 `status` 為空的紀錄（§3.6）。不能把這次的價格算進基準，否則條件永遠成立。沒有任何先前紀錄、DLWatcher 也沒有資料時，`lowest` 不成立。原價永久調降不算 `lowest`，v1 不通知（儀表板照常顯示）。
+4. **計算每條規則的條件**。**查不到時（`s.available` 為 false）、而且已經有基準，4 條規則都維持上次的狀態**，不當成「不成立」（v0.15）：查不到代表不知道現在的狀態。否則「加入時已在打折（建立基準，沒有通知，`notified` 也沒有紀錄）→ 查不到一次 → 恢復」會在恢復時發出 `sale`，去重擋不住（M4 實作時發現，規則表的條件照字面算會漏掉這個情境）。連續查不到超過 7 天時第 3 步清掉 `episode`，恢復時是新的一段優惠，照第 5 步重新上膛。`lowest` 的史低基準 = min(DLWatcher 史低, 自己紀錄中 `at` 早於 `episode.startedAt` 的最低價)，只計算 `status` 為空的紀錄（§3.6）。不能把這次的價格算進基準，否則條件永遠成立。沒有任何先前紀錄、DLWatcher 也沒有資料時，`lowest` 不成立。原價永久調降不算 `lowest`，v1 不通知（儀表板照常顯示）。
 5. **新的一段優惠時**，`sale`、`lowest`、`ending` 的上次結果一律視為不成立。`target` 不重設，因為它看的是價格，不是活動。
-6. **`baselineAt` 為空**（剛加入追蹤，不論從哪裡加入；或暫停後恢復）：把第 3 步的 `episode` 與第 4 步的條件結果寫進 `PriceSnapshot.episode` 與 `RuleState`，設定 `baselineAt`，**不發任何通知**，跳到第 9 步。之後的查價才依狀態轉換通知。
+6. **`baselineAt` 為空**（剛加入追蹤，不論從哪裡加入；或暫停後恢復）：這次查不到時**不建立基準**——規則狀態不動、不設定 `baselineAt`、不通知，快照與 `priceLog` 照常寫，等下一次查得到才建立（v0.16，M4 審查重現：「恢復時已在打折，恢復後那一次剛好查不到」會把 4 條規則記成不成立，下一次查到就發出 `sale`；M3 留下的資料第一次查價查不到也一樣）。查得到時，把第 3 步的 `episode` 與第 4 步的條件結果寫進 `PriceSnapshot.episode` 與 `RuleState`，設定 `baselineAt`，**不發任何通知**，跳到第 9 步。之後的查價才依狀態轉換通知。
 7. **列出候選**：規則開啟、條件成立、上次不成立 → 候選。
 8. **去重**：候選的去重 key（`JSON.stringify([...])`，不直接串接字串，`'1' + '00abc'` 和 `'100' + 'abc'` 會撞在一起）不在 `notified` 裡才保留。同一件作品的多條規則合併成一則，內文列出全部。
 9. **整批寫回再通知**：依 §4.2，等這一批（最多 100 件）每件都處理完，一次寫入 storage 與 IndexedDB，然後才把這批的候選合併成一則通知（「3 個追蹤作品正在特價」）送出。跨批次不合併。
@@ -598,6 +604,7 @@ GET https://www.dlsite.com/home/mypage/coupon/list/ajax
   - 原價 ¥2,000；第一檔活動 c1 ¥1,000 → 通知「特價＋史低」；6 小時後接著第二檔 c2 ¥800（新史低）→ 通知「特價＋史低」。
   - 已結束的快取資料（§5.5 第 3 步）→ `onSale` 為 false，不發 `sale`。
   - 沒有 `campaignId` 與 `discountEnd` 的打折作品，查不到一次後恢復（隔天）→ 不重發通知。
+  - （v0.15）加入時已在打折、查不到一次後恢復 → 不通知。
   - 查不到時，儀表板、popup、試算都不顯示「打折中」。
   - 同一批 3 件作品開始打折 → 只送一則合併通知。
   - 在打折中把目標價調高到現價以上 → 不發 `target`。
@@ -608,8 +615,9 @@ GET https://www.dlsite.com/home/mypage/coupon/list/ajax
 - 作品名稱與券名（`couponExpiring` 會顯示合作網站填寫的券名）放進通知前，用 `s.replace(/[\p{Cc}\u2028\u2029]/gu, ' ').replace(/\p{Cf}/gu, '').replace(/\s+/g, ' ').trim()` 清理：控制字元（含換行、tab）與 U+2028／U+2029 先換成空白（`作品名\n第2巻` 不會黏成 `作品名第2巻`），再刪掉 U+202E 從右到左覆寫、零寬字元等格式字元，最後把連續空白合併。U+2028／U+2029 在 regex 字面裡一定要用 `\u` 跳脫寫法，直接放字元會是語法錯誤。再用 `Array.from(s).slice(0, 60).join('')` 截斷到 60 個字元（`s.slice()` 會切斷 emoji 等補充平面字元）。移除 `Cf` 也會拆開用 ZWJ 組成的 emoji，只影響顯示，可以接受。
 - 設定頁提供「通知不顯示作品名稱」（只顯示「1 個追蹤作品正在特價」），並提醒 Windows 鎖定畫面與通知中心可能顯示通知內容。
 - 內文：作品名稱、現價／原價、折扣、和史低差多少、截止時間。
-- 通知一律用擴充功能內建圖示，不顯示作品縮圖（`iconUrl` 用遠端網址不可靠，service worker 也不能產生 blob URL）。
-- `notificationId` 對應到 `RecentNotification.ids`。單一作品時用 `buildWorkUrl()` 開啟作品頁（§3.4）；多件合併時開啟 `dashboard.html?n=<notificationId>`，儀表板要求 `searchParams.getAll('n').length === 1`、長度 ≤ 64，而且是 `recentNotifications` 裡存在的 ID 才篩選；`couponExpiring` 的通知開啟試算頁 `planner.html`（`ExtPageUrl`）。
+- 通知一律用擴充功能內建圖示（`public/icon/128.png`，也是擴充功能的圖示），不顯示作品縮圖（`iconUrl` 用遠端網址不可靠，service worker 也不能產生 blob URL）。
+- 內文的實際格式（M4）：單一作品是「作品名稱／¥990（原價 ¥1,980，50% OFF）／比史低再低 ¥xxx（或「和史低同價」「比史低高 ¥xxx」）／截止 M/D HH:mm（使用者的時區）」，一行一項；沒有史低基準時省略那一行。「和史低差多少」比的是**這段優惠之前**的最低價：DLWatcher 的史低與最近特價會包含進行中的這段優惠（§5.2：進行中特價的 `end` 是最後看到的時間），所以 `end ≥ episode.startedAt` 的期間不算，自己的紀錄同 §6.1 第 4 步（v0.16，M4 審查：否則真的創新低也常寫成「和史低同價」）。這只影響內文；`lowest` 的條件照 §6.1 第 4 步（用 ≤ 比較，含不含這段優惠結果相同）。多件是「N 個追蹤作品正在特價」（每件都有的規則依 特價 → 史低 → 低於目標價 → 即將截止 選第一個，都沒有共同的就是「有新的優惠」），加前 3 件的「・名稱 ¥價格」與「…還有 N 件」。標題依序列出這則通知涵蓋的規則（「DL_Assistant：特價、史低」）。
+- `notificationId` 對應到 `RecentNotification.ids`。點擊時 background 用 `notificationId` 查 `recentNotifications`，網址自己組，不用通知裡的任何文字；查不到就只關掉通知。單一作品時用 `buildWorkUrl()` 開啟作品頁（§3.4，分站取追蹤清單的 `site`）；多件合併時開啟 `dashboard.html?n=<notificationId>`，儀表板要求 `searchParams.getAll('n').length === 1`、長度 ≤ 64，而且是 `recentNotifications` 裡存在的 ID 才篩選；`couponExpiring` 的通知開啟試算頁 `planner.html`（`ExtPageUrl`）。
 - popup 與儀表板顯示「最近的通知」，系統通知被 Windows 擋掉時也看得到。設定頁加一句：「如果收不到通知，請確認 Windows 設定 → 系統 → 通知裡的 Google Chrome 已開啟。」
 - 儀表板提供「等待建議」：如果現價比史低高、而且這個作品一年有超過 150 天在打折，就標示「通常還會更便宜」。
 
@@ -655,6 +663,7 @@ DL_Assistant/
 ├─ scripts/manifest-policy.ts   # manifest 的固定值（權限、CSP、content script），wxt.config.ts 與 check-manifest 共用
 ├─ scripts/content-modules-plugin.ts  # 建置時列出 content script 的模組（§3.2.5）
 ├─ scripts/content-modules.baseline.json  # content script 可以打包的套件與專案檔案（§3.2.5）
+├─ public/icon/                 # 擴充功能與通知的圖示（16／32／48／128 px；WXT 的 public 目錄在專案根目錄）
 ├─ src/
 │  ├─ entrypoints/
 │  │  ├─ background.ts          # 排程、查價佇列、通知、唯一的 storage 寫入者
@@ -688,7 +697,8 @@ DL_Assistant/
 │  │  ├─ planner/optimize.ts    # 分單＋用券最佳化（§12）
 │  │  ├─ planner/worker.ts      # 件數多時在 Web Worker 裡計算
 │  │  ├─ storage.ts             # storage / IndexedDB 存取層（寫入只在 background）
-│  │  ├─ rules.ts               # isOnSale、通知規則引擎（§6.1 的處理步驟）
+│  │  ├─ rules.ts               # isOnSale、通知規則引擎（§6.1 的處理步驟，純函式）
+│  │  ├─ notify.ts              # 通知內容（清理作品名稱、合併）、chrome.notifications.create、點擊（§6.2）
 │  │  ├─ dates.ts               # parseJst、isCanonicalIso、補年份、parseDlwatcherDate、走勢點換算日期（§5.5）
 │  │  ├─ badge-style.ts         # 注入徽章的樣式字串（單一常數，不含 url()／@import，§3.2.5）
 │  │  └─ selectors.ts           # DLsite DOM 選擇器與頁面文字的 regex（集中管理）
@@ -701,7 +711,7 @@ DL_Assistant/
 │     ├─ WorkImage.tsx          # 作品圖片；唯一可以寫 <img> 的元件（§3.2.2）
 │     └─ ExportButton.tsx       # 匯出下載（blob: 網址的 <a download>，§3.7）
 └─ tests/                       # Vitest 測試；fixtures/ 放去識別化的 API 回應範例
-   ├─ e2e/                      # Chrome 實機驗證（CDP pipe，不用 puppeteer）：verify-m1.ts、verify-m2.ts（假的 DLsite 頁面）、verify-m3.ts（假的商品 API 與 DLWatcher）、check-dev-csp.ts
+   ├─ e2e/                      # Chrome 實機驗證（CDP pipe，不用 puppeteer）：verify-m1.ts、verify-m2.ts（假的 DLsite 頁面）、verify-m3.ts（假的商品 API 與 DLWatcher）、verify-m4.ts（通知與 storage 寫入的不可分割性）、check-dev-csp.ts
    └─ lint-fixtures/            # 每一種違規寫法的範例檔與應該擋下它的規則，CI 確認 ESLint 都會報錯（§3.4）
       └─ content/               # content script 專用的 DOM 寫法範例（§3.2.5）
 ```
@@ -717,7 +727,7 @@ DL_Assistant/
 | M1 骨架（✅ 2026-11-23，v0.9 依審查修正；Chrome 120 實測待補，見 §10.3） | WXT 專案、`zod-setup.ts`、ESLint 規則與 `tests/lint-fixtures/`、`apiGet` 與白名單、`nav.ts` 與連結元件、`Settings` 與 storage 存取層、background 呼叫商品 API 查價、手動加入追蹤（`track` 訊息） | 在 popup 手動加一個作品，看得到現價；`assertAllowed` 行為測試、lint 自我測試、`isWorkId`／`buildWorkUrl`／`intIn`／商品 API 的 `"__proto__"` key 測試通過；manifest 檢查腳本通過；CSP 與 `minimum_chrome_version` 被 Chrome 接受；`setAccessLevel` 生效（content script 呼叫 `chrome.storage.local.get` 會失敗）；§3.4 自我測試表的每個範例都以指定的規則報錯 |
 | M2 自動追蹤（✅ 2026-11-23，v0.11 依審查修正；以照實測結構寫的假頁面驗證，真實 DLsite 與登入狀態的端到端未測） | content script（原生 DOM、import 白名單）偵測加入購物車、購物車 DOM 同步、訊息白名單與來源檢查 | 在 DLsite 加入購物車後，追蹤清單自動多一筆；非 `isTrusted` 的點擊不會加入；content script 打包檔不含 `react`、`storage.local`；content script 的 DOM lint 範例都報錯；content script 的 `track` 計入每日上限；訊息來源的拒絕案例與 `setSettings` 多餘欄位被拒絕的測試通過 |
 | M3 史低（✅ 2026-11-23，v0.14 依審查修正；走勢圖本身在 M5 畫，M3 完成的是走勢資料 `buildTrend()` 與它的測試；popup 顯示史低與 DLWatcher 開關） | DLWatcher 串接、歷史資料存 IndexedDB、自己的 `priceLog`、合理性檢查、查價佇列與退避、定時查價（`check` alarm） | 每個追蹤作品都有史低和期間；在設定關閉 DLWatcher 後，史低與走勢改用自己的紀錄；查價途中 service worker 被終止，重啟後能接著做；「可買 → 查不到 ×3 → 可買（同價）」得到 3 筆紀錄；「關瀏覽器 3 天、前後同價」得到 2 筆紀錄，中間畫虛線；DLWatcher 合理性檢查的 4 個不通過案例（`lowest` 過高、過低、`start > end`、走勢點超出 0～1）都保留舊資料 |
-| M4 通知 | §6.1 的處理步驟（接在 M3 的查價流程上）、去重、一批一次寫入、DLWatcher 自動暫停的系統通知（§3.6） | 作品打折時收到一次通知；回到原價後再次打折會再通知；§6.1 列出的所有測試情境通過（含查不到一次不重發、一批多件合併成一則、暫停恢復） |
+| M4 通知（✅ 2026-11-24，v0.16 依審查修正；商品 API 是 CDP 回應的假資料。系統通知用 `chrome.notifications.getAll()` 確認有建立，headless 沒有實際看到 Windows 通知的畫面；點擊通知 CDP 做不到，開啟的網址只有單元測試；合併通知開啟的 `dashboard.html` 在 M5 才有） | §6.1 的處理步驟（接在 M3 的查價流程上）、去重、一批一次寫入、DLWatcher 自動暫停的系統通知（§3.6） | 作品打折時收到一次通知；回到原價後再次打折會再通知；§6.1 列出的所有測試情境通過（含查不到一次不重發、一批多件合併成一則、暫停恢復） |
 | M5 儀表板 | 表格、走勢圖、等待建議、最近的通知 | 一頁看完所有追蹤作品的價格狀況；`dashboard.html?n=` 帶不存在的 ID 時不篩選、不報錯 |
 | M6 作品頁徽章與臨時查詢 | 作品頁史低徽章、「查史低」按鈕、popup 查詢、右鍵選單與 `lookup.html` | 未追蹤的作品也查得到史低，而且追蹤清單沒有多出東西；開啟 10 個作品頁（含未追蹤），開發者工具的網路面板裡擴充功能沒有發出任何請求 |
 | M7 優惠券同步 | content script 呼叫優惠券 API、`requestCouponSync` 與同步鎖、立即同步、到期提醒 | 在任一 DLsite 頁面觸發同步後，擴充功能裡的券和「マイページ → クーポン管理」顯示的一致；`[]`、全部解析失敗、未登入三種情況本機的券都保留；重複送同一個 `syncToken` 被拒絕；連按「立即同步」只發一次請求；未登入時 1 小時內不重試；`pendingManual` 過期後不能略過 6 小時 |

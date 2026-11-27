@@ -231,7 +231,8 @@ const IMAGE_COMPONENT = 'src/components/WorkImage.tsx';
 const LINK_COMPONENTS = ['src/components/WorkLink.tsx', 'src/components/NavLink.tsx', 'src/components/ExportButton.tsx'];
 
 export default tseslint.config(
-  { ignores: ['.output/**', '.wxt/**', 'node_modules/**', 'tests/lint-fixtures/**', 'tests/e2e/.profile/**'] },
+  // .claude/：Claude Code 的工作資料夾與其他 session 的 worktree（不是專案程式碼）
+  { ignores: ['.output/**', '.wxt/**', 'node_modules/**', 'tests/lint-fixtures/**', 'tests/e2e/.profile/**', '.claude/**'] },
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {

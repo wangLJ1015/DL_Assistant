@@ -12,7 +12,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
-import { Cdp, evaluate, poll, sleep, type Json } from './cdp.ts';
+import { attachServiceWorker, Cdp, closeChrome, evaluate, poll, sleep, watchdog, type Json } from './cdp.ts';
 
 const ROOT = resolve(import.meta.dirname, '../..');
 const EXT_DIR = join(ROOT, '.output/chrome-mv3');
@@ -55,6 +55,7 @@ async function main() {
     stderr += d.toString();
   });
   const cdp = new Cdp(child.stdio[3] as Writable, child.stdio[4] as Readable);
+  const disarm = watchdog('verify-m1', 5 * 60_000, () => [child]);
 
   try {
     const version = await cdp.send('Browser.getVersion');
@@ -73,15 +74,8 @@ async function main() {
     const EXT = `chrome-extension://${extId}`;
 
     await cdp.send('Target.setDiscoverTargets', { discover: true });
-    const swTargetId = await poll(
-      async () => {
-        const { targetInfos } = (await cdp.send('Target.getTargets')) as { targetInfos: { targetId: string; type: string; url: string }[] };
-        return targetInfos.find((t) => t.type === 'service_worker' && t.url === `${EXT}/background.js`)?.targetId;
-      },
-      15_000,
-      'service worker target',
-    );
-    const { sessionId: sw } = (await cdp.send('Target.attachToTarget', { targetId: swTargetId, flatten: true })) as { sessionId: string };
+    // 剛載入時 service worker 可能還在啟動或被替換：等到 chrome.storage 可以用（cdp.ts）
+    const sw = await attachServiceWorker(cdp, EXT);
 
     // 收集所有 session 的錯誤與 CSP 違規
     const problems: string[] = [];
@@ -427,16 +421,12 @@ async function main() {
       relevant.slice(0, 5).join(' | ') || 'none',
     );
   } finally {
-    try {
-      await cdp.send('Browser.close');
-    } catch {
-      child.kill();
-    }
-    await new Promise((r) => child.once('exit', r));
+    await closeChrome(child, cdp);
     await sleep(500);
     rmSync(profile, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 });
   }
 
+  disarm();
   const failed = results.filter((r) => !r.ok);
   console.log(`\n${results.length - failed.length}/${results.length} checks passed`);
   if (failed.length > 0) {

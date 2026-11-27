@@ -19,6 +19,7 @@
     "verify:chrome": "node tests/e2e/verify-m1.ts",
     "verify:m2": "node tests/e2e/verify-m2.ts",
     "verify:m3": "node tests/e2e/verify-m3.ts",
+    "verify:m4": "node tests/e2e/verify-m4.ts",
     "check:all": "prettier --check . && eslint . && tsc --noEmit && vitest run && wxt build && node scripts/check-manifest.ts",
     "format": "prettier --write .",
     "format:check": "prettier --check ."

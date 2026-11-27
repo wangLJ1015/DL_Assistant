@@ -87,8 +87,9 @@ describe('track (M1: popup manual add)', () => {
       site: 'home',
       title: expect.stringContaining('ねこぐらし'),
     });
-    expect(item.baselineAt).toBeUndefined();
     const snap = (await readSnapshots()).get('RJ01014447')!;
+    // §6.1 第 6 步：第一次查價只建立基準，不通知
+    expect(item.baselineAt).toBe(snap.checkedAt);
     expect(snap).toMatchObject({ available: true, price: 1386, officialPrice: 1980, isDiscount: true, discountRate: 30 });
   });
 

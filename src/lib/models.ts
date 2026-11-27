@@ -202,3 +202,43 @@ export type DailyAutoAdd = z.infer<typeof dailyAutoAddSchema>;
 /** `lastCart`：最近一次 cartSnapshot 讀到的作品（F15「從購物車選擇」）。 */
 export const lastCartSchema = z.object({ ids: z.array(workIdSchema).max(200), at: isoSchema }).strict();
 export type LastCart = z.infer<typeof lastCartSchema>;
+
+// ---- 通知（§5.3、§6）----
+
+/** 作品的通知規則（§6 規則表）。`couponExpiring` 是券的規則（M7）。 */
+export const WORK_RULES = ['sale', 'target', 'lowest', 'ending'] as const;
+export type WorkRule = (typeof WORK_RULES)[number];
+export type RuleName = WorkRule | 'couponExpiring';
+/** RecentNotification.rules 的值：通知規則，加上 §3.6 DLWatcher 自動暫停的系統通知。 */
+export const NOTICE_KINDS = [...WORK_RULES, 'couponExpiring', 'dlwatcherPaused'] as const;
+export type NoticeKind = (typeof NOTICE_KINDS)[number];
+
+export const ruleStateSchema = z
+  .object({
+    active: z.boolean(),
+    since: isoSchema.optional(),
+  })
+  .strict();
+export type RuleState = z.infer<typeof ruleStateSchema>;
+/** `ruleState` 的 key：JSON.stringify([對象種類, 對象編號, rule])。 */
+export const RULE_STATE_KEY_MAX = 400;
+export const RULE_STATE_MAX = 20_000;
+
+export const notifiedKeySchema = z.object({ key: z.string().min(1).max(600), at: isoSchema }).strict();
+export type NotifiedKey = z.infer<typeof notifiedKeySchema>;
+/** `notified` 最多保留的筆數（180 天的清理之外的硬上限，留最新的）。 */
+export const NOTIFIED_MAX = 20_000;
+export const NOTIFIED_TTL_MS = 180 * 24 * 60 * 60 * 1000;
+
+export const recentNotificationSchema = z
+  .object({
+    notificationId: z.string().min(1).max(64),
+    ids: z.array(workIdSchema).max(100),
+    couponKeys: z.array(z.string().min(1).max(300)).max(100).optional(),
+    rules: z.array(z.enum(NOTICE_KINDS)).min(1).max(NOTICE_KINDS.length),
+    text: z.string().max(2000),
+    at: isoSchema,
+  })
+  .strict();
+export type RecentNotification = z.infer<typeof recentNotificationSchema>;
+export const RECENT_NOTIFICATIONS_MAX = 50;

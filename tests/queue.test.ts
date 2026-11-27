@@ -126,6 +126,12 @@ describe('§4.1 queues', () => {
     await seed(ids(5));
     await queue.startRun();
     await whenIdle();
+    // 1 毫秒的期限在測試整體負載高時，可能讀完佇列就已經過了、連第一步都沒做（M4 時偶爾失敗）：
+    // 用 drain alarm 叫醒到商品 API 那一步做完為止。
+    for (let i = 0; i < 10 && calls('productInfo').length === 0; i++) {
+      await handleAlarm(ALARM_DRAIN);
+      await whenIdle();
+    }
     const after1 = await readQueues();
     expect(calls('productInfo')).toHaveLength(1);
     expect(after1.dlwatcher.ids.length - after1.dlwatcher.nextIndex).toBeGreaterThan(0);

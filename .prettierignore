@@ -5,3 +5,5 @@ pnpm-lock.yaml
 tests/lint-fixtures/
 tests/__snapshots__/
 *.md
+# Claude Code 的工作資料夾與其他 session 的 worktree（不是專案程式碼）
+.claude/

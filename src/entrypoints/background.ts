@@ -4,8 +4,9 @@ import { defineBackground } from 'wxt/utils/define-background';
 import { handleContentMessage } from '../lib/content-handlers';
 import { classifyMessage, type ExtMessage, type SenderLike, type WriteReply } from '../lib/messages';
 import { ensureSchedule, handleAlarm } from '../lib/queue';
+import { handleNotificationClick } from '../lib/notify';
 import { lockStorageToTrustedContexts } from '../lib/storage';
-import { recheck, resumeDlwatcher, trackItem, untrackItem, updateSettings } from '../lib/tracking';
+import { recheck, resumeDlwatcher, setPaused, setTarget, trackItem, untrackItem, updateSettings } from '../lib/tracking';
 
 type Reply = WriteReply | Record<string, unknown>;
 
@@ -16,6 +17,10 @@ async function handleExt(msg: ExtMessage): Promise<Reply> {
       return trackItem(msg.id, msg.from, { awaitPrice: true });
     case 'untrack':
       return untrackItem(msg.id);
+    case 'setPaused':
+      return setPaused(msg.id, msg.paused);
+    case 'setTarget':
+      return setTarget(msg.id, msg.price);
     case 'recheck':
       // §3.2.4：放進 productInfo 佇列（照樣套用間隔與退避），同一件作品 10 分鐘內只重新查價一次。
       return recheck(msg.ids);
@@ -50,6 +55,11 @@ export default defineBackground(() => {
 
   browser.alarms.onAlarm.addListener((alarm) => {
     void handleAlarm(alarm.name).catch(logError('alarm 處理失敗'));
+  });
+
+  // §6.2：點擊通知。網址由 background 依 recentNotifications 自己組。
+  browser.notifications.onClicked.addListener((notificationId) => {
+    void handleNotificationClick(notificationId).catch(logError('通知點擊處理失敗'));
   });
 
   browser.runtime.onMessage.addListener((raw: unknown, sender: SenderLike, sendResponse: (r: unknown) => void) => {
